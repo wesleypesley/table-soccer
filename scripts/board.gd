@@ -131,6 +131,22 @@ func _spawn_ball() -> void:
 
 # --- physics settle (SRS 02 §4.B) -------------------------------------------
 
+# --- goal detection / reset ------------------------------------------------
+
+func detect_goal() -> int:
+	## Returns the scoring player (0 = bottom/blue scores top goal, 1 = top/red
+	## scores bottom goal), or -1 if the ball isn't fully across a goal line.
+	if ball.position.y < 0.0 and absf(ball.position.x - PITCH.x / 2.0) < GOAL_WIDTH / 2.0:
+		return 0
+	if ball.position.y > PITCH.y and absf(ball.position.x - PITCH.x / 2.0) < GOAL_WIDTH / 2.0:
+		return 1
+	return -1
+
+func reset_ball(pos: Vector2 = PITCH / 2.0) -> void:
+	ball.position = pos
+	ball.linear_velocity = Vector2.ZERO
+	ball.angular_velocity = 0.0
+
 func is_physics_settled() -> bool:
 	if ball.linear_velocity.length() > SLEEP_THRESHOLD:
 		return false

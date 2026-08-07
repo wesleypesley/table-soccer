@@ -142,9 +142,23 @@ func _physics_process(delta: float) -> void:
 			_evaluate_turn()
 
 func _evaluate_turn() -> void:
-	# Goal detection lands in step 4 — for now, just pass the turn.
-	print("[Turn] P%d turn over — ball settled at %s" % [active_player, board.ball.position])
-	_pass_turn()
+	var scorer: int = board.detect_goal()
+	if scorer != -1:
+		score[scorer] += 1
+		print("[Match] GOAL! P%d scores — %d-%d" % [scorer, score[0], score[1]])
+		if score[scorer] >= WIN_GOALS:
+			_end_match(scorer, false)
+			return
+		# conceding player kicks off from own half center (SRS 02 §3)
+		active_player = 1 - scorer
+		board.reset_ball(Vector2(board.PITCH.x / 2.0, 810.0 if active_player == 0 else 270.0))
+		state = State.TURN_START
+		turn_timer = TURN_SECONDS
+		turn_changed.emit(active_player)
+		print("[Turn] P%d kicks off after goal" % active_player)
+	else:
+		print("[Turn] P%d turn over — ball settled at %s" % [active_player, board.ball.position])
+		_pass_turn()
 
 func _pass_turn() -> void:
 	active_player = 1 - active_player
