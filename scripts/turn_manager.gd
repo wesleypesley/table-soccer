@@ -64,11 +64,14 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	state = State.TURN_START
 	turn_timer = TURN_SECONDS
 	passes_left = pass_limit
-	var pos: Vector2 = board.ball.position
 	if is_kickoff:
-		board.reset_ball(Vector2(board.PITCH.x / 2.0, 810.0 if active_player == 0 else 270.0))
-		pos = board.ball.position
-	holder = _nearest_own_cap(pos)
+		board.reset_ball(Vector2(board.PITCH.x / 2.0, board.PITCH.y / 2.0))   # kickoff at center
+	holder = _nearest_own_cap(board.ball.position)
+	if is_kickoff:
+		# kickoff taker steps up to the center spot (ball renders at exact center)
+		holder.freeze = true
+		holder.position = board.ball.position - HELD_OFFSET
+		holder.freeze = false
 	_attach_ball(holder)
 	turn_changed.emit(active_player)
 	print("[Turn] P%d — ball with cap %d, %d passes" % [active_player, board.caps.find(holder), passes_left])
@@ -237,19 +240,12 @@ func _physics_process(delta: float) -> void:
 	if ball.linear_velocity.length() < STOP_THRESHOLD:
 		_lose_possession(null)
 
-func _lose_possession(cap: RigidBody2D) -> void:
-	if cap != null:
-		var team := 0 if board.caps.find(cap) < 5 else 1
-		print("[Turn] P%d lost ball to %s cap %d" % [active_player, "own" if team == active_player else "opponent", board.caps.find(cap)])
-		_attach_ball(cap)
-		# if opponent touched, they get possession; if own cap with 0 passes, opponent turn
-		if team != active_player:
-			_pass_turn()
-		else:
-			_pass_turn()
-	else:
-		print("[Turn] P%d ball died — possession lost" % active_player)
-		_pass_turn()
+func _lose_possession(_cap: RigidBody2D) -> void:
+	# Ball never sticks to an opponent (or to an own cap with no passes left).
+	# Possession changes: ball resets to the new owner's half center.
+	var new_owner := 1 - active_player
+	board.reset_ball(Vector2(board.PITCH.x / 2.0, 810.0 if new_owner == 0 else 270.0))
+	_pass_turn()
 
 func _on_goal(scorer: int) -> void:
 	score[scorer] += 1
@@ -259,8 +255,7 @@ func _on_goal(scorer: int) -> void:
 		return
 	active_player = 1 - scorer               # conceding player kicks off
 	passes_left = pass_limit
-	board.reset_ball(Vector2(board.PITCH.x / 2.0, 810.0 if active_player == 0 else 270.0))
-	_setup_turn()
+	_setup_turn(true)
 	print("[Turn] P%d kicks off after goal" % active_player)
 
 func _pass_turn() -> void:
