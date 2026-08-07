@@ -40,6 +40,8 @@ var _aim_start := Vector2.ZERO
 var _aim_current := Vector2.ZERO
 var _aiming := false
 var _preview: Line2D
+var _flight_time := 0.0                 # seconds since launch
+const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
 
 signal turn_changed(player: int)
 signal match_over(winner: int)
@@ -90,14 +92,24 @@ func _attach_ball(cap: RigidBody2D) -> void:
 	board.ball.angular_velocity = 0.0
 	board.ball.position = cap.position + HELD_OFFSET
 
-func _launch_ball(dir: Vector2, speed: float) -> void:
+func _launch_puck(dir: Vector2, speed: float) -> void:
+	## Slingshot the HOLDER PUCK: impulse to the puck, which physically kicks
+	## the ball (ball is freed from the holder, placed just ahead of it).
 	var ball: RigidBody2D = board.ball
-	ball.position = holder.position + dir.normalized() * (CAPTURE_DIST + 8.0)   # clear of holder
+	var d := dir.normalized()
+	# free the ball and place it at the puck's striking edge (exact contact
+	# distance — the puck's motion closes the gap and kicks it forward)
 	ball.collision_layer = 1
 	ball.collision_mask = 1
-	ball.linear_velocity = dir.normalized() * speed      # direct set — no freeze/impulse race
+	ball.linear_velocity = Vector2.ZERO
+	ball.angular_velocity = 0.0
+	ball.position = holder.position + d * CAPTURE_DIST
+	# impulse to the PUCK (impulse = desired velocity × mass). The puck slides
+	# forward, collides with the ball, and the ball flies — like real table soccer.
+	holder.apply_central_impulse(d * speed * holder.mass)
 	state = State.FLIGHT
-	print("[Turn] P%d launches %s dir=%s speed=%.0f" % [active_player, "pass" if passes_left > 0 else "shot", dir.normalized(), speed])
+	_flight_time = 0.0
+	print("[Turn] P%d slingshots cap %d dir=%s speed=%.0f" % [active_player, board.caps.find(holder), d, speed])
 
 # --- input ------------------------------------------------------------------
 
@@ -166,17 +178,18 @@ func _resolve_swipe(start: Vector2, end: Vector2) -> void:
 	if holder == null:
 		state = State.TURN_START        # ball is free — pick it up first
 		return
-	var dir := end - start
+	# slingshot: pull BACK from the target; launch direction is the reverse drag
+	var dir := start - end
 	if dir.length() < 20.0:
-		state = State.TURN_START        # tap, not a swipe
+		state = State.TURN_START        # tap, not a slingshot pull
 		return
 	var speed := clampf(dir.length() * BALL_SPEED_SCALE, BALL_SPEED_MIN, BALL_SPEED_MAX)
 	if passes_left > 0:
 		var target := _find_pass_target(dir.normalized())
 		if target != null:
-			_launch_ball(target.position - holder.position, speed)
+			_launch_puck(target.position - holder.position, speed)
 			return
-	_launch_ball(dir, speed)            # no pass target → shot
+	_launch_puck(dir, speed)            # no pass target → shot
 
 func _find_pass_target(dir: Vector2) -> RigidBody2D:
 	var best: RigidBody2D = null
@@ -200,7 +213,8 @@ func _update_preview() -> void:
 	_preview.clear_points()
 	if holder == null:
 		return
-	var dir := _aim_current - _aim_start
+	# slingshot: pull-back vector reversed = launch direction
+	var dir := _aim_start - _aim_current
 	if dir.length() < 20.0:
 		return
 	if passes_left > 0:
@@ -226,6 +240,7 @@ func _physics_process(delta: float) -> void:
 			ball.linear_velocity = Vector2.ZERO
 			ball.angular_velocity = 0.0
 		return
+	_flight_time += delta
 	# goal?
 	var scorer: int = board.detect_goal()
 	if scorer != -1:
@@ -249,7 +264,8 @@ func _physics_process(delta: float) -> void:
 			# opponent (or own cap with no passes left): physics bounce only
 			return
 	# ball died without being captured → stays where it stopped, turn passes
-	if ball.linear_velocity.length() < STOP_THRESHOLD:
+	# (min flight time: the puck needs a moment to make contact and kick it)
+	if _flight_time > MIN_FLIGHT_TIME and ball.linear_velocity.length() < STOP_THRESHOLD:
 		_lose_possession()
 
 func _lose_possession() -> void:
