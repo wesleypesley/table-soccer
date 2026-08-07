@@ -65,16 +65,20 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	turn_timer = TURN_SECONDS
 	passes_left = pass_limit
 	if is_kickoff:
-		board.reset_ball(Vector2(board.PITCH.x / 2.0, board.PITCH.y / 2.0))   # kickoff at center
-	holder = _nearest_own_cap(board.ball.position)
-	if is_kickoff:
-		# kickoff taker steps up to the center spot (ball renders at exact center)
-		holder.freeze = true
-		holder.position = board.ball.position - HELD_OFFSET
-		holder.freeze = false
-	_attach_ball(holder)
+		# kickoff / after-goal: ball to center spot, kicking player takes it
+		board.reset_ball(Vector2(board.PITCH.x / 2.0, board.PITCH.y / 2.0))
+		var taker := _nearest_own_cap(board.ball.position)
+		taker.freeze = true
+		taker.position = board.ball.position - HELD_OFFSET
+		taker.freeze = false
+		_attach_ball(taker)
+	else:
+		# possession change: ball stays where it stopped, free on the pitch
+		holder = null
+		board.ball.collision_layer = 1
+		board.ball.collision_mask = 1
 	turn_changed.emit(active_player)
-	print("[Turn] P%d — ball with cap %d, %d passes" % [active_player, board.caps.find(holder), passes_left])
+	print("[Turn] P%d — ball %s" % [active_player, "with cap %d, %d passes" % [board.caps.find(holder), passes_left] if holder else "free on pitch, %d passes" % passes_left])
 
 # --- ball attach / launch ---------------------------------------------------
 
@@ -146,6 +150,12 @@ func _process(delta: float) -> void:
 			lo.y = CAP_RADIUS + 10
 			hi.y = HALF - CAP_RADIUS - 10
 		_dragging_cap.position = p.clamp(lo, hi)
+		# pickup: drag a cap into the free ball → it sticks
+		if holder == null and _dragging_cap.position.distance_to(board.ball.position) < CAPTURE_DIST:
+			_attach_ball(_dragging_cap)
+			state = State.TURN_START
+			turn_timer = TURN_SECONDS
+			print("[Turn] P%d picks up ball with cap %d" % [active_player, board.caps.find(_dragging_cap)])
 
 	if state == State.TURN_START or state == State.MOVING:
 		turn_timer -= delta
@@ -153,6 +163,9 @@ func _process(delta: float) -> void:
 			_handle_timeout()
 
 func _resolve_swipe(start: Vector2, end: Vector2) -> void:
+	if holder == null:
+		state = State.TURN_START        # ball is free — pick it up first
+		return
 	var dir := end - start
 	if dir.length() < 20.0:
 		state = State.TURN_START        # tap, not a swipe
@@ -218,7 +231,8 @@ func _physics_process(delta: float) -> void:
 	if scorer != -1:
 		_on_goal(scorer)
 		return
-	# stick to a cap on contact
+	# stick ONLY on own-teammate contact (with passes left). Opponent/wall
+	# contact is pure physics — the ball bounces and keeps flying.
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
 		if cap == holder:
@@ -226,25 +240,22 @@ func _physics_process(delta: float) -> void:
 		if cap.position.distance_to(ball.position) < CAPTURE_DIST:
 			var team := 0 if i < 5 else 1
 			if team == active_player and passes_left > 0:
-				# own capture → possession continues, pass consumed
 				passes_left -= 1
 				_attach_ball(cap)
 				state = State.TURN_START
 				turn_timer = TURN_SECONDS
 				print("[Turn] P%d pass complete → cap %d (%d passes left)" % [active_player, i, passes_left])
-			else:
-				# opponent touch (or own touch with no passes left) → lost ball
-				_lose_possession(cap)
+				return
+			# opponent (or own cap with no passes left): physics bounce only
 			return
-	# ball died without being captured → lost ball
+	# ball died without being captured → stays where it stopped, turn passes
 	if ball.linear_velocity.length() < STOP_THRESHOLD:
-		_lose_possession(null)
+		_lose_possession()
 
-func _lose_possession(_cap: RigidBody2D) -> void:
-	# Ball never sticks to an opponent (or to an own cap with no passes left).
-	# Possession changes: ball resets to the new owner's half center.
-	var new_owner := 1 - active_player
-	board.reset_ball(Vector2(board.PITCH.x / 2.0, 810.0 if new_owner == 0 else 270.0))
+func _lose_possession() -> void:
+	# Ball stays exactly where it stopped — no reset, no teleport, no stick.
+	holder = null
+	print("[Turn] P%d lost ball — it rests at %s" % [active_player, board.ball.position])
 	_pass_turn()
 
 func _on_goal(scorer: int) -> void:
