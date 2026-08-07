@@ -1,0 +1,15 @@
+# Godot 4 generated/cache
+.godot/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor backups
+*.tmp
+*.bak
+
+# Exports
+/build/
+/export/
