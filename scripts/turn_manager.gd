@@ -92,15 +92,22 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 
 # --- ball attach / launch ---------------------------------------------------
 
+var _hold_offset := Vector2(0, -34)             # ball's rest position relative to holder
+
 func _attach_ball(cap: RigidBody2D) -> void:
 	holder = cap
 	board.ball.collision_layer = 0                      # held ball doesn't collide
 	board.ball.collision_mask = 0
 	board.ball.linear_velocity = Vector2.ZERO
 	board.ball.angular_velocity = 0.0
-	# ball at holder's feet, toward the opponent's goal (P0 attacks up, P1 down)
-	var side := -1.0 if active_player == 0 else 1.0
-	board.ball.position = cap.position + Vector2(0, 34.0 * side)
+	# Plato-style: the ball stays where it ARRIVED relative to the cap (contact
+	# point) — no teleport to a forward offset. Fallback if the ball spawned
+	# overlapping: park it at the cap's feet toward the opponent goal.
+	var rel: Vector2 = board.ball.position - cap.position
+	if rel.length() < 30.0 or rel.length() > CAPTURE_DIST + 12.0:
+		rel = Vector2(0, -34.0) if active_player == 0 else Vector2(0, 34.0)
+	_hold_offset = rel
+	board.ball.position = cap.position + _hold_offset
 
 func _launch_cap(cap: RigidBody2D, pull: Vector2, speed: float) -> void:
 	## Slingshot a NON-holder puck (reposition / collect the free ball).
@@ -273,8 +280,7 @@ func _physics_process(delta: float) -> void:
 	if state != State.FLIGHT:
 		# glue held ball to holder (no freeze — collisions are off while held)
 		if holder != null:
-			var side := -1.0 if active_player == 0 else 1.0
-			ball.position = holder.position + Vector2(0, 34.0 * side)
+			ball.position = holder.position + _hold_offset
 			ball.linear_velocity = Vector2.ZERO
 			ball.angular_velocity = 0.0
 		return

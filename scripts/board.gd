@@ -6,8 +6,8 @@ const GOAL_WIDTH := 160.0                      # centered on top/bottom
 const CAP_RADIUS := 44.0
 const BALL_RADIUS := 22.0
 const SLEEP_THRESHOLD := 5.0                   # px/s per SRS 02 §4.B
-const CAP_MASS := 5.0
-const BALL_MASS := 1.0
+const CAP_MASS := 15.0                 # caps heavy vs ball — ball barely moves them
+const BALL_MASS := 0.5                  # light ball: struck by cap, doesn't shove caps
 
 var caps: Array[RigidBody2D] = []
 var ball: RigidBody2D
