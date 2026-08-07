@@ -287,9 +287,11 @@ func _physics_process(delta: float) -> void:
 	_flight_time += delta
 
 	if not _ball_in_flight:
-		# cap-only launch (no ball): the puck slides. If it strikes the FREE
-		# ball, the ball is knocked into flight (pure physics — no stick).
-		# If the puck dies without touching the ball → whiff, possession lost.
+		# cap-only launch (no ball): the puck slides.
+		# - If it strikes the FREE ball, the ball is knocked into flight.
+		# - If the puck dies without touching a FREE ball, possession is lost.
+		# - If the ball is HELD by another cap, the slide is a free reposition:
+		#   nothing is lost, the turn continues.
 		if _launcher != null and holder == null \
 				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
 			_ball_in_flight = true
@@ -297,7 +299,13 @@ func _physics_process(delta: float) -> void:
 			return
 		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
 				and _flight_time > MIN_FLIGHT_TIME:
-			_lose_possession()
+			if holder == null:
+				_lose_possession()
+			else:
+				# free reposition — turn continues, ball stays with the holder
+				_launcher = null
+				state = State.TURN_START
+				print("[Turn] P%d repositions cap (ball held)" % active_player)
 		return
 
 	# goal?
