@@ -1,5 +1,5 @@
 extends CanvasLayer
-## Minimal HUD: score, active player, turn timer. Placeholder styling — polish later.
+## Minimal HUD: score, active player, turn timer, passes left. Placeholder styling.
 
 var score_label: Label
 var timer_label: Label
@@ -28,10 +28,16 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	score_label.text = "%d - %d" % [turn_manager.score[0], turn_manager.score[1]]
-	if turn_manager.state == turn_manager.State.SIMULATING or turn_manager.state == turn_manager.State.EVALUATE:
-		timer_label.text = "simulating…"
+	var tm := turn_manager
+	if tm.state == tm.State.FLIGHT:
+		timer_label.text = "ball in flight…"
+	elif tm.state == tm.State.MATCH_OVER:
+		timer_label.text = "match over"
 	else:
-		timer_label.text = "P%d %.1fs" % [turn_manager.active_player, maxf(turn_manager.turn_timer, 0.0)]
+		var passes := "∞" if tm.pass_limit >= tm.INF_PASSES else str(tm.passes_left)
+		timer_label.text = "P%d %.1fs  passes:%s" % [tm.active_player, maxf(tm.turn_timer, 0.0), passes]
 
 func _on_turn_changed(player: int) -> void:
-	timer_label.text = "P%d 15.0s" % player
+	var tm := turn_manager
+	var passes := "∞" if tm.pass_limit >= tm.INF_PASSES else str(tm.passes_left)
+	timer_label.text = "P%d 15.0s  passes:%s" % [player, passes]
