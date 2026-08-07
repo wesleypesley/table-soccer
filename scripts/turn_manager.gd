@@ -22,6 +22,7 @@ const PASS_CONE := 0.5                               # rad (~29°) half-angle fo
 const MAX_PASS_DIST := 500.0
 const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "feet" (P0: above cap)
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
+const MOMENTUM_CARRY := 0.15                      # cap+ball glide together after a hard pass
 const HALF := 540.0                                   # pitch center Y
 const PITCH_X := 720.0
 const PITCH_Y := 1080.0
@@ -45,7 +46,9 @@ var _aim_start := Vector2.ZERO
 var _aim_current := Vector2.ZERO
 var _preview: Line2D
 var _flight_time := 0.0                 # seconds since launch
+var _brake_timer := 0.0                 # striker follow-through brake delay
 const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
+const STRIKE_BRAKE_DELAY := 0.02       # 1 frame to contact the ball, then bleed speed
 
 signal turn_changed(player: int)
 signal match_over(winner: int)
@@ -94,20 +97,22 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 
 var _hold_offset := Vector2(0, -34)             # ball's rest position relative to holder
 
-func _attach_ball(cap: RigidBody2D) -> void:
+func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> void:
 	holder = cap
 	board.ball.collision_layer = 0                      # held ball doesn't collide
 	board.ball.collision_mask = 0
 	board.ball.linear_velocity = Vector2.ZERO
 	board.ball.angular_velocity = 0.0
-	# Plato-style: the ball stays where it ARRIVED relative to the cap (contact
-	# point) — no teleport to a forward offset. Fallback if the ball spawned
-	# overlapping: park it at the cap's feet toward the opponent goal.
+	# Graceful stick: ball settles AT the cap's edge (contact distance), on the
+	# side it arrived from — no floating gap, no teleport through the cap.
 	var rel: Vector2 = board.ball.position - cap.position
 	if rel.length() < 30.0 or rel.length() > CAPTURE_DIST + 12.0:
 		rel = Vector2(0, -34.0) if active_player == 0 else Vector2(0, 34.0)
-	_hold_offset = rel
+	_hold_offset = rel.normalized() * CAPTURE_DIST
 	board.ball.position = cap.position + _hold_offset
+	# Plato momentum carry: the arriving ball shoves the receiver — cap + ball
+	# glide together (feel-tuned; pure mass ratio would be invisible at 30:1).
+	cap.linear_velocity = incoming_vel * MOMENTUM_CARRY
 
 func _launch_cap(cap: RigidBody2D, pull: Vector2, speed: float) -> void:
 	## Slingshot a NON-holder puck (reposition / collect the free ball).
@@ -140,6 +145,7 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	holder.apply_central_impulse(d * speed * holder.mass)
 	state = State.FLIGHT
 	_flight_time = 0.0
+	_brake_timer = STRIKE_BRAKE_DELAY
 	print("[Turn] P%d slingshots cap %d dir=%s speed=%.0f" % [active_player, board.caps.find(holder), d, speed])
 
 # --- input ------------------------------------------------------------------
@@ -278,6 +284,14 @@ func _update_preview() -> void:
 
 func _physics_process(delta: float) -> void:
 	var ball: RigidBody2D = board.ball
+	# striker follow-through brake — engages only AFTER the ball is in flight
+	# (i.e. the cap has struck/kicked it) and keeps bleeding the striker's speed
+	# even after the pass is caught, so it can't cannonball into the receiver.
+	if _launcher != null and _ball_in_flight:
+		if _brake_timer > 0.0:
+			_brake_timer -= delta
+		elif _launcher.linear_velocity.length() > 120.0:
+			_launcher.linear_velocity *= 0.85
 	if state != State.FLIGHT:
 		# glue held ball to holder (no freeze — collisions are off while held)
 		if holder != null:
@@ -297,6 +311,7 @@ func _physics_process(delta: float) -> void:
 				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
 			_ball_in_flight = true
 			_flight_time = 0.0   # grace restarts: cap still has to close the gap
+			_brake_timer = STRIKE_BRAKE_DELAY
 			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
 			return
 		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
@@ -326,7 +341,7 @@ func _physics_process(delta: float) -> void:
 			var team := 0 if i < 5 else 1
 			if team == active_player and passes_left > 0:
 				passes_left -= 1
-				_attach_ball(cap)
+				_attach_ball(cap, ball.linear_velocity)
 				state = State.TURN_START
 				turn_timer = TURN_SECONDS
 				print("[Turn] P%d pass complete → cap %d (%d passes left)" % [active_player, i, passes_left])
