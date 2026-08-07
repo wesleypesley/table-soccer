@@ -12,7 +12,7 @@ const WIN_GOALS := 5
 const INF_PASSES := 999
 
 const BALL_SPEED_SCALE := 2.0
-const BALL_SPEED_MIN := 500.0
+const BALL_SPEED_MIN := 300.0
 const BALL_SPEED_MAX := 1400.0
 const CAP_RADIUS := 44.0
 const BALL_RADIUS := 22.0
@@ -199,7 +199,9 @@ func _fire_pull(pull: Vector2) -> void:
 	_launch_puck(dir, speed)            # no pass target → shot
 
 func _pull_speed(pull: Vector2) -> float:
-	return clampf(pull.length() * BALL_SPEED_SCALE, BALL_SPEED_MIN, BALL_SPEED_MAX)
+	## Linear power curve: full 150px pull = max speed, small pull = gentle slide.
+	var t := clampf(pull.length() / MAX_PULL, 0.0, 1.0)
+	return lerpf(BALL_SPEED_MIN, BALL_SPEED_MAX, t)
 
 func _set_selected(cap: RigidBody2D) -> void:
 	if _selected_cap != null and is_instance_valid(_selected_cap):
@@ -280,9 +282,11 @@ func _physics_process(delta: float) -> void:
 
 	if not _ball_in_flight:
 		# cap-only launch (no ball): it slides; contact with the FREE ball
-		# collects it (turn continues); otherwise a whiff costs possession
+		# collects it (turn continues); otherwise a whiff costs possession.
+		# Margin: the solver can separate touching bodies slightly before the
+		# check runs, so require a small overlap tolerance.
 		if _launcher != null and holder == null \
-				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST:
+				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
 			_attach_ball(_launcher)
 			state = State.TURN_START
 			turn_timer = TURN_SECONDS
@@ -304,7 +308,7 @@ func _physics_process(delta: float) -> void:
 		var cap: RigidBody2D = board.caps[i]
 		if cap == holder:
 			continue
-		if cap.position.distance_to(ball.position) < CAPTURE_DIST:
+		if cap.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
 			var team := 0 if i < 5 else 1
 			if team == active_player and passes_left > 0:
 				passes_left -= 1

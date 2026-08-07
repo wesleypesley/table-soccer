@@ -85,8 +85,8 @@ func _make_cap(pos: Vector2, color: Color) -> RigidBody2D:
 	cap.name = "Cap"
 	cap.position = pos
 	cap.mass = CAP_MASS
-	cap.linear_damp = 4.0        # caps stop quickly (glide feel per SRS 01)
-	cap.angular_damp = 4.0
+	cap.linear_damp = 1.0        # caps glide: total travel ≈ launch speed (px)
+	cap.angular_damp = 2.0
 	var mat := PhysicsMaterial.new()
 	mat.friction = 1.0
 	mat.bounce = 0.05            # caps barely bounce
