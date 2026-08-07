@@ -181,22 +181,23 @@ func _handle_press(pos: Vector2, pressed: bool) -> void:
 			_pulling = false
 
 func _fire_pull(pull: Vector2) -> void:
-	## Slingshot: pull-back vector reversed = launch direction. Impulse to the
-	## SELECTED puck (whether it holds the ball or not).
-	if holder == null and _selected_cap != holder:
-		# ball free: a non-holder puck can still be slingshotted (it slides and
-		# may collect the free ball, or just moves)
-		_launch_cap(_selected_cap, pull, _pull_speed(pull))
+	## Slingshot the SELECTED puck. If it holds the ball → pass or shot.
+	## Otherwise the puck slides; if it strikes the free ball the ball is
+	## knocked into flight (physics) — it never sticks to the striker.
+	var cap := _selected_cap
+	if cap == null:
 		return
-	# holder has the ball → pass or shot
-	var dir := pull.normalized()
-	var speed := _pull_speed(pull)
-	if passes_left > 0:
-		var target := _find_pass_target(dir)
-		if target != null:
-			_launch_puck(target.position - holder.position, speed)
-			return
-	_launch_puck(dir, speed)            # no pass target → shot
+	if cap == holder:
+		var dir := pull.normalized()
+		var speed := _pull_speed(pull)
+		if passes_left > 0:
+			var target := _find_pass_target(dir)
+			if target != null:
+				_launch_puck(target.position - holder.position, speed)
+				return
+		_launch_puck(dir, speed)            # no pass target → shot
+	else:
+		_launch_cap(cap, pull, _pull_speed(pull))
 
 func _pull_speed(pull: Vector2) -> float:
 	## Linear power curve: full 150px pull = max speed, small pull = gentle slide.
@@ -281,16 +282,13 @@ func _physics_process(delta: float) -> void:
 	_flight_time += delta
 
 	if not _ball_in_flight:
-		# cap-only launch (no ball): it slides; contact with the FREE ball
-		# collects it (turn continues); otherwise a whiff costs possession.
-		# Margin: the solver can separate touching bodies slightly before the
-		# check runs, so require a small overlap tolerance.
+		# cap-only launch (no ball): the puck slides. If it strikes the FREE
+		# ball, the ball is knocked into flight (pure physics — no stick).
+		# If the puck dies without touching the ball → whiff, possession lost.
 		if _launcher != null and holder == null \
 				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
-			_attach_ball(_launcher)
-			state = State.TURN_START
-			turn_timer = TURN_SECONDS
-			print("[Turn] P%d collects ball with cap %d" % [active_player, board.caps.find(_launcher)])
+			_ball_in_flight = true
+			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
 			return
 		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
 				and _flight_time > MIN_FLIGHT_TIME:
@@ -302,11 +300,12 @@ func _physics_process(delta: float) -> void:
 	if scorer != -1:
 		_on_goal(scorer)
 		return
-	# stick ONLY on own-teammate contact (with passes left). Opponent/wall
-	# contact is pure physics — the ball bounces and keeps flying.
+	# stick ONLY on own-teammate contact (with passes left), EXCEPT the striker
+	# (the cap that launched/kicked — ball can't pass to the cap that hit it).
+	# Opponent/wall contact is pure physics — the ball bounces and keeps flying.
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
-		if cap == holder:
+		if cap == holder or cap == _launcher:
 			continue
 		if cap.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
 			var team := 0 if i < 5 else 1
