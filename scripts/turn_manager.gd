@@ -214,12 +214,11 @@ func _set_selected(cap: RigidBody2D) -> void:
 # --- turn logic -------------------------------------------------------------
 
 func _process(delta: float) -> void:
-	# pull-back visual: selected puck eases back along the pull vector
+	# Plato-style aim: the selected puck does NOT move — only the arrow shows
+	# direction/power while pulling. The puck launches from its current spot.
 	if _pulling and _selected_cap != null:
-		var p := get_viewport().get_mouse_position()
-		var pull := (_aim_start - p).limit_length(MAX_PULL)
-		_selected_cap.position = _cap_base_pos - pull * 0.5   # puck visibly pulls back
-		_aim_current = p
+		_aim_current = get_viewport().get_mouse_position()
+		_update_preview()
 
 	if state == State.TURN_START or state == State.MOVING:
 		turn_timer -= delta
