@@ -301,12 +301,17 @@ func _physics_process(delta: float) -> void:
 				_brake_timer -= delta
 			elif _launcher.linear_velocity.length() > 120.0:
 				_launcher.linear_velocity *= 0.85
+	# glue the held ball to its holder whenever it is NOT in flight — in every
+	# state, INCLUDING a reposition slide. Without this, ramming the ball
+	# owner knocks the holder away while the ball (collisions off) hangs frozen
+	# mid-air, then snaps back to the holder when the turn resumes — the
+	# "cut"/teleport glitch. With it, the owner moves WITH the ball (simple
+	# collision, like Plato).
+	if holder != null and not _ball_in_flight:
+		ball.position = holder.position + _hold_offset
+		ball.linear_velocity = Vector2.ZERO
+		ball.angular_velocity = 0.0
 	if state != State.FLIGHT:
-		# glue held ball to holder (no freeze — collisions are off while held)
-		if holder != null:
-			ball.position = holder.position + _hold_offset
-			ball.linear_velocity = Vector2.ZERO
-			ball.angular_velocity = 0.0
 		return
 	_flight_time += delta
 
