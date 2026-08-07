@@ -7,9 +7,9 @@ enum State { MATCH_START, TURN_START, MOVING, AIMING, SIMULATING, EVALUATE, MATC
 const TURN_SECONDS := 15.0
 const MAX_TIMEOUTS := 3
 const WIN_GOALS := 5
-const SHOT_POWER_SCALE := 0.15      # swipe px/s → impulse units
-const SHOT_POWER_MIN := 100.0
-const SHOT_POWER_MAX := 900.0
+const SHOT_POWER_SCALE := 2.0       # swipe px/s → impulse units
+const SHOT_POWER_MIN := 600.0
+const SHOT_POWER_MAX := 2600.0
 const CAP_RADIUS := 44.0
 const HALF := 540.0                 # pitch center Y
 const PITCH_X := 720.0
@@ -116,11 +116,17 @@ func _fire_shot(start: Vector2, end: Vector2) -> void:
 	if dir.length() < 10.0:
 		state = State.MOVING      # tap, not a swipe — no shot
 		return
+	var shooter: RigidBody2D = _get_shooter(start)
+	if shooter == null:
+		state = State.MOVING      # no own cap near the swipe — nothing to strike with
+		return
 	var power := clampf(dir.length() * SHOT_POWER_SCALE, SHOT_POWER_MIN, SHOT_POWER_MAX)
-	board.ball.apply_central_impulse(dir.normalized() * power)
+	if shooter.freeze:
+		shooter.freeze = false
+	shooter.apply_central_impulse(dir.normalized() * power)   # cap strikes, ball reacts
 	state = State.SIMULATING
 	_sim_time = 0.0
-	print("[Turn] P%d shot dir=%s power=%.0f" % [active_player, dir.normalized(), power])
+	print("[Turn] P%d cap %d strikes dir=%s power=%.0f" % [active_player, board.caps.find(shooter), dir.normalized(), power])
 
 func _update_preview() -> void:
 	_preview.visible = true
@@ -128,9 +134,11 @@ func _update_preview() -> void:
 	var dir := _aim_current - _aim_start
 	if dir.length() < 10.0:
 		return
+	var shooter: RigidBody2D = _get_shooter(_aim_start)
+	var from: Vector2 = shooter.position if shooter != null else board.ball.position
 	var power := clampf(dir.length() * SHOT_POWER_SCALE, SHOT_POWER_MIN, SHOT_POWER_MAX)
-	_preview.add_point(board.ball.position)
-	_preview.add_point(board.ball.position + dir.normalized() * (power * 0.35))
+	_preview.add_point(from)
+	_preview.add_point(from + dir.normalized() * (power * 0.35))
 
 # --- settle / evaluate ------------------------------------------------------
 
@@ -195,3 +203,21 @@ func _cap_at(pos: Vector2) -> RigidBody2D:
 		if cap.position.distance_to(pos) <= CAP_RADIUS + 6.0:
 			return cap
 	return null
+
+func _get_shooter(pos: Vector2) -> RigidBody2D:
+	## Cap under the swipe start, else the nearest own cap.
+	var cap := _cap_at(pos)
+	if cap != null:
+		return cap
+	var best: RigidBody2D = null
+	var best_d := INF
+	for i in board.caps.size():
+		var c: RigidBody2D = board.caps[i]
+		var team := 0 if i < 5 else 1
+		if team != active_player:
+			continue
+		var d := c.position.distance_to(pos)
+		if d < best_d:
+			best_d = d
+			best = c
+	return best
