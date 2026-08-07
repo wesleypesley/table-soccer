@@ -20,7 +20,7 @@ const CAPTURE_DIST := CAP_RADIUS + BALL_RADIUS      # 66 px — ball sticks on c
 const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = lost ball
 const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
-const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "feet"
+const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "feet" (P0: above cap)
 const HALF := 540.0                                   # pitch center Y
 const PITCH_X := 720.0
 const PITCH_Y := 1080.0
@@ -67,13 +67,12 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	turn_timer = TURN_SECONDS
 	passes_left = pass_limit
 	if is_kickoff:
-		# kickoff / after-goal: ball to center spot, kicking player takes it
+		# kickoff / after-goal: ball to center spot, FREE. The kicking player
+		# picks it up by dragging a cap onto it (pickup mechanic).
 		board.reset_ball(Vector2(board.PITCH.x / 2.0, board.PITCH.y / 2.0))
-		var taker := _nearest_own_cap(board.ball.position)
-		taker.freeze = true
-		taker.position = board.ball.position - HELD_OFFSET
-		taker.freeze = false
-		_attach_ball(taker)
+		holder = null
+		board.ball.collision_layer = 1
+		board.ball.collision_mask = 1
 	else:
 		# possession change: ball stays where it stopped, free on the pitch
 		holder = null
@@ -90,20 +89,23 @@ func _attach_ball(cap: RigidBody2D) -> void:
 	board.ball.collision_mask = 0
 	board.ball.linear_velocity = Vector2.ZERO
 	board.ball.angular_velocity = 0.0
-	board.ball.position = cap.position + HELD_OFFSET
+	# ball at holder's feet, toward the opponent's goal (P0 attacks up, P1 down)
+	var side := -1.0 if active_player == 0 else 1.0
+	board.ball.position = cap.position + Vector2(0, 34.0 * side)
 
 func _launch_puck(dir: Vector2, speed: float) -> void:
 	## Slingshot the HOLDER PUCK: impulse to the puck, which physically kicks
 	## the ball (ball is freed from the holder, placed just ahead of it).
 	var ball: RigidBody2D = board.ball
 	var d := dir.normalized()
-	# free the ball and place it at the puck's striking edge (exact contact
-	# distance — the puck's motion closes the gap and kicks it forward)
+	# free the ball and place it at the puck's striking edge — in FRONT of the
+	# puck along the launch direction, with a small gap so the puck's motion
+	# closes it and kicks the ball (exact-contact spawn makes the solver jitter)
 	ball.collision_layer = 1
 	ball.collision_mask = 1
 	ball.linear_velocity = Vector2.ZERO
 	ball.angular_velocity = 0.0
-	ball.position = holder.position + d * CAPTURE_DIST
+	ball.position = holder.position + d * (CAPTURE_DIST + 6.0)
 	# impulse to the PUCK (impulse = desired velocity × mass). The puck slides
 	# forward, collides with the ball, and the ball flies — like real table soccer.
 	holder.apply_central_impulse(d * speed * holder.mass)
@@ -236,7 +238,8 @@ func _physics_process(delta: float) -> void:
 	if state != State.FLIGHT:
 		# glue held ball to holder (no freeze — collisions are off while held)
 		if holder != null:
-			ball.position = holder.position + HELD_OFFSET
+			var side := -1.0 if active_player == 0 else 1.0
+			ball.position = holder.position + Vector2(0, 34.0 * side)
 			ball.linear_velocity = Vector2.ZERO
 			ball.angular_velocity = 0.0
 		return
