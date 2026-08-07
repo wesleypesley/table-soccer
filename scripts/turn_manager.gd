@@ -47,6 +47,7 @@ var _aim_current := Vector2.ZERO
 var _preview: Line2D
 var _flight_time := 0.0                 # seconds since launch
 var _brake_timer := 0.0                 # striker follow-through brake delay
+var _struck := false                    # launcher has physically kicked the ball
 const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
 const STRIKE_BRAKE_DELAY := 0.02       # 1 frame to contact the ball, then bleed speed
 
@@ -119,6 +120,7 @@ func _launch_cap(cap: RigidBody2D, pull: Vector2, speed: float) -> void:
 	## Ball isn't launched — it may be collected on contact with this puck.
 	_launcher = cap
 	_ball_in_flight = false
+	_struck = false
 	var d := pull.normalized()
 	cap.apply_central_impulse(d * speed * cap.mass)
 	state = State.FLIGHT
@@ -132,6 +134,7 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	var d := dir.normalized()
 	_launcher = holder
 	_ball_in_flight = true
+	_struck = false
 	# free the ball and place it at the puck's striking edge — in FRONT of the
 	# puck along the launch direction, with a small gap so the puck's motion
 	# closes it and kicks the ball (exact-contact spawn makes the solver jitter)
@@ -284,14 +287,20 @@ func _update_preview() -> void:
 
 func _physics_process(delta: float) -> void:
 	var ball: RigidBody2D = board.ball
-	# striker follow-through brake — engages only AFTER the ball is in flight
-	# (i.e. the cap has struck/kicked it) and keeps bleeding the striker's speed
+	# striker follow-through brake — engages only AFTER the launcher has actually
+	# KICKED the ball (ball in motion), then keeps bleeding the striker's speed
 	# even after the pass is caught, so it can't cannonball into the receiver.
+	# Gated on _struck, NOT a timer: the launcher must always be able to close
+	# the gap to the ball first, however slow the shot (fixes low-speed passes
+	# dying at spawn because the brake killed the puck mid-approach).
 	if _launcher != null and _ball_in_flight:
-		if _brake_timer > 0.0:
-			_brake_timer -= delta
-		elif _launcher.linear_velocity.length() > 120.0:
-			_launcher.linear_velocity *= 0.85
+		if ball.linear_velocity.length() > 40.0:
+			_struck = true
+		if _struck:
+			if _brake_timer > 0.0:
+				_brake_timer -= delta
+			elif _launcher.linear_velocity.length() > 120.0:
+				_launcher.linear_velocity *= 0.85
 	if state != State.FLIGHT:
 		# glue held ball to holder (no freeze — collisions are off while held)
 		if holder != null:
