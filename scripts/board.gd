@@ -103,6 +103,7 @@ func _make_cap(pos: Vector2, color: Color) -> RigidBody2D:
 
 func _cap_draw(color: Color) -> Node2D:
 	var d := Node2D.new()
+	d.name = "Draw"
 	d.set_script(load("res://scripts/cap_draw.gd"))
 	d.set("cap_color", color)
 	return d

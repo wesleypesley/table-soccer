@@ -21,6 +21,7 @@ const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = l
 const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
 const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "feet" (P0: above cap)
+const MAX_PULL := 150.0                           # max slingshot pull-back (px)
 const HALF := 540.0                                   # pitch center Y
 const PITCH_X := 720.0
 const PITCH_Y := 1080.0
@@ -35,10 +36,13 @@ var pass_limit: int = 3                               # match setting: 3 / 5 / I
 var passes_left: int = 3
 
 var holder: RigidBody2D = null                        # cap the ball is stuck to
-var _dragging_cap: RigidBody2D = null
+var _selected_cap: RigidBody2D = null                 # currently selected (highlight)
+var _cap_base_pos := Vector2.ZERO                     # cap pos when pull started
+var _launcher: RigidBody2D = null                     # cap launched this action
+var _ball_in_flight := false                          # true when ball was launched
+var _pulling := false
 var _aim_start := Vector2.ZERO
 var _aim_current := Vector2.ZERO
-var _aiming := false
 var _preview: Line2D
 var _flight_time := 0.0                 # seconds since launch
 const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
@@ -66,6 +70,11 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	state = State.TURN_START
 	turn_timer = TURN_SECONDS
 	passes_left = pass_limit
+	_launcher = null
+	_ball_in_flight = false
+	if _selected_cap != null and is_instance_valid(_selected_cap):
+		_selected_cap.get_node("Draw").set("selected", false)
+	_selected_cap = null
 	if is_kickoff:
 		# kickoff / after-goal: ball to center spot, FREE. The kicking player
 		# picks it up by dragging a cap onto it (pickup mechanic).
@@ -93,11 +102,24 @@ func _attach_ball(cap: RigidBody2D) -> void:
 	var side := -1.0 if active_player == 0 else 1.0
 	board.ball.position = cap.position + Vector2(0, 34.0 * side)
 
+func _launch_cap(cap: RigidBody2D, pull: Vector2, speed: float) -> void:
+	## Slingshot a NON-holder puck (reposition / collect the free ball).
+	## Ball isn't launched — it may be collected on contact with this puck.
+	_launcher = cap
+	_ball_in_flight = false
+	var d := pull.normalized()
+	cap.apply_central_impulse(d * speed * cap.mass)
+	state = State.FLIGHT
+	_flight_time = 0.0
+	print("[Turn] P%d slingshots cap %d (no ball) dir=%s speed=%.0f" % [active_player, board.caps.find(cap), d, speed])
+
 func _launch_puck(dir: Vector2, speed: float) -> void:
 	## Slingshot the HOLDER PUCK: impulse to the puck, which physically kicks
 	## the ball (ball is freed from the holder, placed just ahead of it).
 	var ball: RigidBody2D = board.ball
 	var d := dir.normalized()
+	_launcher = holder
+	_ball_in_flight = true
 	# free the ball and place it at the puck's striking edge — in FRONT of the
 	# puck along the launch direction, with a small gap so the puck's motion
 	# closes it and kicks the ball (exact-contact spawn makes the solver jitter)
@@ -120,12 +142,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		_handle_press(event.position, event.pressed)
-	elif event is InputEventMouseMotion and _aiming:
+	elif event is InputEventMouseMotion and _pulling:
 		_aim_current = event.position
 		_update_preview()
 	elif event is InputEventScreenTouch:
 		_handle_press(event.position, event.pressed)
-	elif event is InputEventScreenDrag and _aiming:
+	elif event is InputEventScreenDrag and _pulling:
 		_aim_current = event.position
 		_update_preview()
 
@@ -133,65 +155,74 @@ func _handle_press(pos: Vector2, pressed: bool) -> void:
 	if pressed:
 		var cap := _cap_at(pos)
 		if cap != null:
-			state = State.MOVING
-			_dragging_cap = cap
-			_dragging_cap.freeze = true
-			print("[Turn] P%d drag cap %d" % [active_player, board.caps.find(cap)])
-		else:
-			state = State.MOVING
-			_aiming = true
+			# SELECT: highlight the puck. Selection is free — switch as much
+			# as you want; only a pull+release commits.
+			_set_selected(cap)
+			state = State.TURN_START
+			_cap_base_pos = cap.position
+			_pulling = true
 			_aim_start = pos
 			_aim_current = pos
-			_update_preview()
+			print("[Turn] P%d selects cap %d" % [active_player, board.caps.find(cap)])
+		else:
+			_set_selected(null)     # tap empty space = deselect
 	else:
-		if _dragging_cap != null:
-			_dragging_cap.freeze = false
-			_dragging_cap = null
-			state = State.TURN_START
-		elif _aiming:
-			_aiming = false
+		if _pulling and _selected_cap != null:
+			_pulling = false
+			var pull := _aim_start - _aim_current      # pull-back vector
 			_preview.visible = false
-			_resolve_swipe(_aim_start, _aim_current)
+			if pull.length() < 20.0:
+				# tap, not a pull — stay selected, nothing committed
+				_selected_cap.position = _cap_base_pos
+				return
+			_fire_pull(pull)
+			_set_selected(null)          # shot fired — clear highlight
+		else:
+			_pulling = false
+
+func _fire_pull(pull: Vector2) -> void:
+	## Slingshot: pull-back vector reversed = launch direction. Impulse to the
+	## SELECTED puck (whether it holds the ball or not).
+	if holder == null and _selected_cap != holder:
+		# ball free: a non-holder puck can still be slingshotted (it slides and
+		# may collect the free ball, or just moves)
+		_launch_cap(_selected_cap, pull, _pull_speed(pull))
+		return
+	# holder has the ball → pass or shot
+	var dir := pull.normalized()
+	var speed := _pull_speed(pull)
+	if passes_left > 0:
+		var target := _find_pass_target(dir)
+		if target != null:
+			_launch_puck(target.position - holder.position, speed)
+			return
+	_launch_puck(dir, speed)            # no pass target → shot
+
+func _pull_speed(pull: Vector2) -> float:
+	return clampf(pull.length() * BALL_SPEED_SCALE, BALL_SPEED_MIN, BALL_SPEED_MAX)
+
+func _set_selected(cap: RigidBody2D) -> void:
+	if _selected_cap != null and is_instance_valid(_selected_cap):
+		_selected_cap.get_node("Draw").set("selected", false)
+	_selected_cap = cap
+	if cap != null:
+		cap.get_node("Draw").set("selected", true)
 
 # --- turn logic -------------------------------------------------------------
 
 func _process(delta: float) -> void:
-	if state == State.MOVING and _dragging_cap != null:
+	# pull-back visual: selected puck eases back along the pull vector
+	if _pulling and _selected_cap != null:
 		var p := get_viewport().get_mouse_position()
-		var lo := Vector2(CAP_RADIUS + 10, HALF + CAP_RADIUS + 10)
-		var hi := Vector2(PITCH_X - CAP_RADIUS - 10, PITCH_Y - CAP_RADIUS - 10)
-		if active_player == 1:
-			lo.y = CAP_RADIUS + 10
-			hi.y = HALF - CAP_RADIUS - 10
-		_dragging_cap.position = p.clamp(lo, hi)
-		# pickup: drag a cap into the free ball → it sticks
-		if holder == null and _dragging_cap.position.distance_to(board.ball.position) < CAPTURE_DIST:
-			_attach_ball(_dragging_cap)
-			state = State.TURN_START
-			turn_timer = TURN_SECONDS
-			print("[Turn] P%d picks up ball with cap %d" % [active_player, board.caps.find(_dragging_cap)])
+		var pull := (_aim_start - p).limit_length(MAX_PULL)
+		_selected_cap.position = _cap_base_pos - pull * 0.5   # puck visibly pulls back
+		_aim_current = p
 
 	if state == State.TURN_START or state == State.MOVING:
 		turn_timer -= delta
 		if turn_timer <= 0.0:
 			_handle_timeout()
 
-func _resolve_swipe(start: Vector2, end: Vector2) -> void:
-	if holder == null:
-		state = State.TURN_START        # ball is free — pick it up first
-		return
-	# slingshot: pull BACK from the target; launch direction is the reverse drag
-	var dir := start - end
-	if dir.length() < 20.0:
-		state = State.TURN_START        # tap, not a slingshot pull
-		return
-	var speed := clampf(dir.length() * BALL_SPEED_SCALE, BALL_SPEED_MIN, BALL_SPEED_MAX)
-	if passes_left > 0:
-		var target := _find_pass_target(dir.normalized())
-		if target != null:
-			_launch_puck(target.position - holder.position, speed)
-			return
-	_launch_puck(dir, speed)            # no pass target → shot
 
 func _find_pass_target(dir: Vector2) -> RigidBody2D:
 	var best: RigidBody2D = null
@@ -213,23 +244,25 @@ func _find_pass_target(dir: Vector2) -> RigidBody2D:
 func _update_preview() -> void:
 	_preview.visible = true
 	_preview.clear_points()
-	if holder == null:
+	var cap := _selected_cap
+	if cap == null:
 		return
-	# slingshot: pull-back vector reversed = launch direction
+	# slingshot: pull-back vector reversed = launch direction (from the puck)
 	var dir := _aim_start - _aim_current
 	if dir.length() < 20.0:
 		return
-	if passes_left > 0:
-		var target := _find_pass_target(dir.normalized())
-		if target != null:
-			_preview.default_color = Color(0.4, 1, 0.5, 0.8)   # green = pass
-			_preview.add_point(holder.position)
-			_preview.add_point(target.position)
-			return
-	_preview.default_color = Color(1, 1, 1, 0.6)               # white = shot
-	var speed := clampf(dir.length() * BALL_SPEED_SCALE, BALL_SPEED_MIN, BALL_SPEED_MAX)
-	_preview.add_point(holder.position)
-	_preview.add_point(holder.position + dir.normalized() * (speed * 0.25))
+	if cap == holder:
+		if passes_left > 0:
+			var target := _find_pass_target(dir.normalized())
+			if target != null:
+				_preview.default_color = Color(0.4, 1, 0.5, 0.8)   # green = pass
+				_preview.add_point(cap.position)
+				_preview.add_point(target.position)
+				return
+	_preview.default_color = Color(1, 1, 1, 0.6)               # white = shot / slide
+	var speed := _pull_speed(dir)
+	_preview.add_point(cap.position)
+	_preview.add_point(cap.position + dir.normalized() * (speed * 0.25))
 
 # --- flight / capture -------------------------------------------------------
 
@@ -244,6 +277,22 @@ func _physics_process(delta: float) -> void:
 			ball.angular_velocity = 0.0
 		return
 	_flight_time += delta
+
+	if not _ball_in_flight:
+		# cap-only launch (no ball): it slides; contact with the FREE ball
+		# collects it (turn continues); otherwise a whiff costs possession
+		if _launcher != null and holder == null \
+				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST:
+			_attach_ball(_launcher)
+			state = State.TURN_START
+			turn_timer = TURN_SECONDS
+			print("[Turn] P%d collects ball with cap %d" % [active_player, board.caps.find(_launcher)])
+			return
+		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
+				and _flight_time > MIN_FLIGHT_TIME:
+			_lose_possession()
+		return
+
 	# goal?
 	var scorer: int = board.detect_goal()
 	if scorer != -1:
