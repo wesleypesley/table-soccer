@@ -228,9 +228,10 @@ func _process(delta: float) -> void:
 		_update_preview()
 
 	if state == State.TURN_START or state == State.MOVING:
-		turn_timer -= delta
-		if turn_timer <= 0.0:
-			_handle_timeout()
+		if get_window().has_focus():          # pause timer while window unfocused
+			turn_timer -= delta
+			if turn_timer <= 0.0:
+				_handle_timeout()
 
 
 func _find_pass_target(dir: Vector2) -> RigidBody2D:
@@ -295,6 +296,7 @@ func _physics_process(delta: float) -> void:
 		if _launcher != null and holder == null \
 				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
 			_ball_in_flight = true
+			_flight_time = 0.0   # grace restarts: cap still has to close the gap
 			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
 			return
 		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
@@ -329,8 +331,9 @@ func _physics_process(delta: float) -> void:
 				turn_timer = TURN_SECONDS
 				print("[Turn] P%d pass complete → cap %d (%d passes left)" % [active_player, i, passes_left])
 				return
-			# opponent (or own cap with no passes left): physics bounce only
-			return
+			# opponent (or own cap with no passes left): physics bounce only —
+			# keep checking other caps and still reach the die-check below
+			continue
 	# ball died without being captured → stays where it stopped, turn passes
 	# (min flight time: the puck needs a moment to make contact and kick it)
 	if _flight_time > MIN_FLIGHT_TIME and ball.linear_velocity.length() < STOP_THRESHOLD:
