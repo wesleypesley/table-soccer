@@ -24,6 +24,7 @@ const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "fe
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
 const MOMENTUM_CARRY := 0.15                      # cap+ball glide together after a hard pass
 const MAX_BALL_SPEED := 2600.0                    # tunnel guard: 43 px/frame < 64px (wall 20 + ball 44)
+const HELD_BALL_SPEED := 1500.0                   # held ball can't exceed — 25px/frame < 44px cap radius, so it can never skip past a cap (phase-through guard)
 const HALF := 540.0                                   # pitch center Y
 const PITCH_X := 720.0
 const PITCH_Y := 1080.0
@@ -58,9 +59,10 @@ signal match_over(winner: int)
 func _ready() -> void:
 	_preview = Line2D.new()
 	_preview.width = 6.0
-	_preview.default_color = Color(1, 1, 1, 0.6)
+	_preview.default_color = Color(Design.SELECT_RING, 0.7)
 	_preview.visible = false
 	board.add_child(_preview)
+	board.ball.body_entered.connect(_on_ball_body_entered)
 	_start_match()
 
 func _start_match() -> void:
@@ -83,17 +85,28 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	if is_kickoff:
 		# kickoff / after-goal: ball to center spot, FREE. The kicking player
 		# picks it up by dragging a cap onto it (pickup mechanic).
+		_untether()
 		board.reset_ball(Vector2(board.PITCH.x / 2.0, board.PITCH.y / 2.0))
 		holder = null
 		board.ball.collision_layer = 1
 		board.ball.collision_mask = 1
 	else:
 		# possession change: ball stays where it stopped, free on the pitch
+		_untether()
 		holder = null
 		board.ball.collision_layer = 1
 		board.ball.collision_mask = 1
 	turn_changed.emit(active_player)
+	_update_team_glow()
 	print("[Turn] P%d — ball %s" % [active_player, "with cap %d, %d passes" % [board.caps.find(holder), passes_left] if holder else "free on pitch, %d passes" % passes_left])
+
+func _update_team_glow() -> void:
+	# whole active team breathes softly (Plato "your turn" readability);
+	# the selected cap additionally gets the gold ring via its Draw node.
+	for i in board.caps.size():
+		var disc = board.caps[i].get_node_or_null("Disc")
+		if disc != null:
+			disc.set("team_active", i / 5 == active_player)
 
 # --- ball attach / launch ---------------------------------------------------
 
@@ -101,8 +114,15 @@ var _hold_offset := Vector2(0, -34)             # ball's rest position relative 
 
 func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> void:
 	holder = cap
-	board.ball.collision_layer = 0                      # held ball doesn't collide
-	board.ball.collision_mask = 0
+	_ball_in_flight = false              # capture ENDS flight — tether engages
+	_launcher = null                     # striker no longer excluded; brake off
+	_struck = false
+	# Option A: the ball stays a REAL body while held — it collides with other
+	# caps and walls, so any hit swings it around the tether. It only never
+	# collides with its own holder (collision exception = the tether).
+	board.ball.collision_layer = 1
+	board.ball.collision_mask = 1
+	board.ball.add_collision_exception_with(cap)
 	board.ball.linear_velocity = Vector2.ZERO
 	board.ball.angular_velocity = 0.0
 	# Graceful stick: ball settles AT the cap's edge (contact distance), on the
@@ -115,6 +135,11 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 	# Plato momentum carry: the arriving ball shoves the receiver — cap + ball
 	# glide together (feel-tuned; pure mass ratio would be invisible at 30:1).
 	cap.linear_velocity = incoming_vel * MOMENTUM_CARRY
+
+func _untether() -> void:
+	## Drop the collision exception between ball and holder.
+	if holder != null and is_instance_valid(holder):
+		board.ball.remove_collision_exception_with(holder)
 
 func _launch_cap(cap: RigidBody2D, pull: Vector2, speed: float) -> void:
 	## Slingshot a NON-holder puck (reposition / collect the free ball).
@@ -136,6 +161,7 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	_launcher = holder
 	_ball_in_flight = true
 	_struck = false
+	_untether()                      # ball leaves the holder — drop the exception
 	# free the ball and place it at the puck's striking edge — in FRONT of the
 	# puck along the launch direction, with a small gap so the puck's motion
 	# closes it and kicks the ball (exact-contact spawn makes the solver jitter)
@@ -157,15 +183,17 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if state == State.MATCH_OVER or state == State.FLIGHT:
 		return
+	# convert to board-local coords (board is centered in the canvas)
+	var pos := board.to_local(event.position)
 	if event is InputEventMouseButton:
-		_handle_press(event.position, event.pressed)
+		_handle_press(pos, event.pressed)
 	elif event is InputEventMouseMotion and _pulling:
-		_aim_current = event.position
+		_aim_current = pos
 		_update_preview()
 	elif event is InputEventScreenTouch:
-		_handle_press(event.position, event.pressed)
+		_handle_press(pos, event.pressed)
 	elif event is InputEventScreenDrag and _pulling:
-		_aim_current = event.position
+		_aim_current = pos
 		_update_preview()
 
 func _handle_press(pos: Vector2, pressed: bool) -> void:
@@ -234,7 +262,7 @@ func _process(delta: float) -> void:
 	# Plato-style aim: the selected puck does NOT move — only the arrow shows
 	# direction/power while pulling. The puck launches from its current spot.
 	if _pulling and _selected_cap != null:
-		_aim_current = get_viewport().get_mouse_position()
+		_aim_current = board.to_local(get_viewport().get_mouse_position())
 		_update_preview()
 
 	if state == State.TURN_START or state == State.MOVING:
@@ -308,16 +336,74 @@ func _physics_process(delta: float) -> void:
 				_brake_timer -= delta
 			elif _launcher.linear_velocity.length() > 120.0:
 				_launcher.linear_velocity *= 0.85
-	# glue the held ball to its holder whenever it is NOT in flight — in every
-	# state, INCLUDING a reposition slide. Without this, ramming the ball
-	# owner knocks the holder away while the ball (collisions off) hangs frozen
-	# mid-air, then snaps back to the holder when the turn resumes — the
-	# "cut"/teleport glitch. With it, the owner moves WITH the ball (simple
-	# collision, like Plato).
+	# TETHER: the held ball is a REAL body that orbits the cap. Each frame we
+	# project it back onto the contact circle (hard constraint — keeps the ball
+	# glued to its owner, never through the holder) and cancel only the RADIAL
+	# velocity, preserving tangential motion = the orbit. Crucially the
+	# projection is SKIPPED when the path to the circle is blocked by another
+	# cap or a wall (test_move) — then the physics solver handles the real
+	# collision and the ball genuinely rebounds instead of phasing through the
+	# blocker. A held-ball speed cap guarantees the ball can't move far enough
+	# per frame to skip past a cap's collision shape.
 	if holder != null and not _ball_in_flight:
-		ball.position = holder.position + _hold_offset
-		ball.linear_velocity = Vector2.ZERO
+		if ball.linear_velocity.length() > HELD_BALL_SPEED:
+			ball.linear_velocity = ball.linear_velocity.normalized() * HELD_BALL_SPEED
+		var rel: Vector2 = ball.position - holder.position
+		var dist := rel.length()
+		if dist > 0.01:
+			var base_angle := rel.angle()
+			# Find the nearest CLEAR point on the orbit circle. Try the direct
+			# angle first, then sweep around the FULL circle in small
+			# alternating steps so the ball slides around any cap blocking the
+			# orbit path (real rebound, no phase-through) and returns to its
+			# 66px orbit instead of parking against the blocker. A short sweep
+			# (~±46°) let the ball decouple: when the clear side was further
+			# out, nothing re-placed it and it froze at the wrong radius.
+			var placed := false
+			for sweep in range(34):
+				var a := base_angle
+				if sweep > 0:
+					var dir_sign := 1.0 if sweep % 2 == 1 else -1.0
+					a += dir_sign * (float(sweep) + 1.0) * 0.1   # ~5.7° steps, full circle
+				var cand := holder.position + Vector2.from_angle(a) * CAPTURE_DIST
+				var blocked := false
+				for i in board.caps.size():
+					var c: RigidBody2D = board.caps[i]
+					if c == holder:
+						continue
+					if cand.distance_to(c.position) < CAPTURE_DIST:
+						blocked = true
+						break
+				if not blocked and (cand.x < 42.0 or cand.x > 678.0 \
+						or cand.y < 42.0 or cand.y > 1038.0):
+					blocked = true
+				if not blocked:
+					ball.position = cand
+					placed = true
+					break
+			# Constrain velocity ONLY when the ball was re-placed on the orbit:
+			# cancel the radial component (so a shove becomes orbit instead of
+			# dragging the ball away) and preserve the tangential part = the
+			# orbit. While blocked (surrounded), velocity is left untouched so
+			# the solver's bounce-out impulse survives and the ball can return
+			# to the circle once a gap opens — freezing it at the wrong radius
+			# was the decoupling bug.
+			if placed:
+				var rel_v: Vector2 = ball.linear_velocity - holder.linear_velocity
+				var radial := rel_v.dot(rel / dist) * (rel / dist)
+				ball.linear_velocity = holder.linear_velocity + (rel_v - radial)
 		ball.angular_velocity = 0.0
+		# Release rule: an opponent cap touching the HOLDER (or the ball — see
+		# _on_ball_body_entered) breaks the tether: possession is lost.
+		for i in board.caps.size():
+			var cap: RigidBody2D = board.caps[i]
+			if cap == holder:
+				continue
+			var team := 0 if i < 5 else 1
+			if team != active_player \
+					and cap.position.distance_to(holder.position) < CAP_RADIUS * 2.0 + 6.0:
+				_lose_possession()
+				break
 	if state != State.FLIGHT:
 		return
 	_flight_time += delta
@@ -377,9 +463,27 @@ func _physics_process(delta: float) -> void:
 
 func _lose_possession() -> void:
 	# Ball stays exactly where it stopped — no reset, no teleport, no stick.
+	_untether()
 	holder = null
 	print("[Turn] P%d lost ball — it rests at %s" % [active_player, board.ball.position])
 	_pass_turn()
+
+func _on_ball_body_entered(body: Node) -> void:
+	## Release rule: while the ball is HELD, opponent contact with the ball
+	## breaks the tether — possession is lost. Teammate/wall contact orbits.
+	## body_entered fires MID physics-step; mutating physics from inside the
+	## signal (untether, layer changes, turn switch) crashes Godot natively.
+	## So the whole possession loss is deferred to the end of the frame.
+	if holder == null or _ball_in_flight:
+		return
+	if not (body is RigidBody2D):
+		return                       # wall / other static body — orbit only
+	var idx: int = board.caps.find(body)
+	if idx == -1:
+		return
+	var team := 0 if idx < 5 else 1
+	if team != active_player:
+		_lose_possession.call_deferred()
 
 func _on_goal(scorer: int) -> void:
 	score[scorer] += 1
