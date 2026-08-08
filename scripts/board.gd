@@ -43,16 +43,17 @@ func _build_walls() -> void:
 	add_child(walls)
 
 	var half_gap := GOAL_WIDTH / 2.0
+	var wall_len := (PITCH.x - GOAL_WIDTH) / 2.0      # 280: flanking segment length
 	var segs := [
 		# left, right walls (full height)
 		[Vector2(0, PITCH.y / 2), Vector2(20, PITCH.y), 0.0],
 		[Vector2(PITCH.x, PITCH.y / 2), Vector2(20, PITCH.y), 0.0],
-		# top wall split around goal mouth
-		[Vector2(PITCH.x / 2 - half_gap / 2 - 10, 0), Vector2(PITCH.x / 2 - half_gap - 10, 20), 0.0],
-		[Vector2(PITCH.x / 2 + half_gap / 2 + 10, 0), Vector2(PITCH.x / 2 + half_gap + 10, 20), 0.0],
+		# top wall split around goal mouth: [0..280] and [440..720]
+		[Vector2(wall_len / 2.0, 0), Vector2(wall_len, 20), 0.0],
+		[Vector2(PITCH.x - wall_len / 2.0, 0), Vector2(wall_len, 20), 0.0],
 		# bottom wall split around goal mouth
-		[Vector2(PITCH.x / 2 - half_gap / 2 - 10, PITCH.y), Vector2(PITCH.x / 2 - half_gap - 10, 20), 0.0],
-		[Vector2(PITCH.x / 2 + half_gap / 2 + 10, PITCH.y), Vector2(PITCH.x / 2 + half_gap + 10, 20), 0.0],
+		[Vector2(wall_len / 2.0, PITCH.y), Vector2(wall_len, 20), 0.0],
+		[Vector2(PITCH.x - wall_len / 2.0, PITCH.y), Vector2(wall_len, 20), 0.0],
 	]
 	for s in segs:
 		var rect := RectangleShape2D.new()
@@ -147,6 +148,8 @@ func reset_ball(pos: Vector2 = PITCH / 2.0) -> void:
 	ball.position = pos
 	ball.linear_velocity = Vector2.ZERO
 	ball.angular_velocity = 0.0
+	ball.collision_layer = 1       # a reset ball is always FREE — restore collisions
+	ball.collision_mask = 1        # (a held ball has layer 0 and would ghost through walls)
 
 func is_physics_settled() -> bool:
 	if ball.linear_velocity.length() > SLEEP_THRESHOLD:
@@ -157,10 +160,4 @@ func is_physics_settled() -> bool:
 	return true
 
 func _process(_delta: float) -> void:
-	# debug: spacebar kicks the ball so physics settle can be observed
-	if Input.is_key_pressed(KEY_SPACE) and is_physics_settled():
-		ball.apply_central_impulse(Vector2(randf_range(-1, 1), -randf_range(200, 400)))
-		print("[Board] debug kick -> ball velocity ", ball.linear_velocity)
-	if Input.is_key_pressed(KEY_R):
-		ball.position = PITCH / 2.0
-		ball.linear_velocity = Vector2.ZERO
+	pass  # debug scaffolding removed — no R/SPACE hacks in live play

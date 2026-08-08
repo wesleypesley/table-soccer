@@ -23,6 +23,7 @@ const MAX_PASS_DIST := 500.0
 const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "feet" (P0: above cap)
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
 const MOMENTUM_CARRY := 0.15                      # cap+ball glide together after a hard pass
+const MAX_BALL_SPEED := 2600.0                    # tunnel guard: 43 px/frame < 64px (wall 20 + ball 44)
 const HALF := 540.0                                   # pitch center Y
 const PITCH_X := 720.0
 const PITCH_Y := 1080.0
@@ -287,6 +288,12 @@ func _update_preview() -> void:
 
 func _physics_process(delta: float) -> void:
 	var ball: RigidBody2D = board.ball
+	# Wall-tunnel guard: a fast cap can double-hit the ball (ball bounces off
+	# the wall back into the oncoming cap, which re-kicks it into the wall at
+	# ~2x speed). Above ~3840 px/s the ball crosses wall(20px)+diameter(44px)
+	# in a single physics frame and escapes the pitch. Clamp so it can't.
+	if ball.linear_velocity.length() > MAX_BALL_SPEED:
+		ball.linear_velocity = ball.linear_velocity.normalized() * MAX_BALL_SPEED
 	# striker follow-through brake — engages only AFTER the launcher has actually
 	# KICKED the ball (ball in motion), then keeps bleeding the striker's speed
 	# even after the pass is caught, so it can't cannonball into the receiver.
