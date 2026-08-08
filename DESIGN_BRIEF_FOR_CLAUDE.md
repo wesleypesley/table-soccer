@@ -2,6 +2,8 @@
 
 You are taking over the **visual/design layer** of a Godot 4.7 table-soccer game that mimics **Plato Table Soccer (Tactical mode)**. The gameplay physics are DONE and verified (see `PHYSICS_BRIEF_FOR_CLAUDE.md` in the same repo). Your job: make the game **look like the real Plato app** — vibrant, polished, with depth — using the design tokens and rendering approach already in place. Do NOT touch gameplay logic, physics, or the tether.
 
+> **THE DESIGN GOAL, ABOVE ALL ELSE:** the finished game must look and feel **as close to the real Plato Table Soccer as possible** — same visual identity, same proportions, same vibe. When you are deciding between two options and one brings the game closer to Plato's look, choose that one, always. The real Plato screenshot (user-provided, measured in §5) is the **visual spec**; the Design tokens in `design.gd` encode it. If you ever find yourself designing something that does not exist in real Plato, stop and ask — it is probably wrong.
+
 ---
 
 ## 0. The ONE rule: verify every visual change with a screenshot + pixel analysis
