@@ -13,3 +13,7 @@ Desktop.ini
 # Exports
 /build/
 /export/
+
+# Dev preview screenshots (pitch_preview*.png + Godot import sidecars)
+/pitch_preview*.png
+/pitch_preview*.png.import
