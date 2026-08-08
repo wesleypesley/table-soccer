@@ -14,10 +14,12 @@ This document consolidates the complete functional and technical specification s
    * Networking: offnetic core (Nostr signaling + WebRTC data channels), thin game protocol, no Netfox in v1
 
 2. **[Gameplay & Turn System Spec](./02_gameplay_turn_system.md)**
-   * Plato Table Soccer Tactical-style gameplay: turn-based, swipe-to-shoot.
-   * First-to-N-goals win condition (no clock, no ties), 15-second turn timer.
-   * 3-Strike AFK penalty rule; pre-match formation + team select.
+   * Plato Table Soccer Tactical-style gameplay: turn-based, **select-then-pull slingshot** input.
+   * **Ball capture / pass chains (Part 1 core):** ball sticks to a cap on contact (tether orbit at 66px), 3/5/∞ pass limit, striker excluded, release on any opponent touch.
+   * First-to-5-goals win condition (no clock, no ties), 15-second turn timer.
+   * 3-Strike AFK penalty rule; pre-match formation + team select **[planned — Part 2]**.
    * Active/simultaneous mode deferred (needs real-time networking).
+   * **Status: Part 1 (core gameplay + visuals) implemented.**
 
 3. **[Bot AI Spec](./03_bot_ai_spec.md)**
    * Bot = input source in the same match FSM (no ML, no server).

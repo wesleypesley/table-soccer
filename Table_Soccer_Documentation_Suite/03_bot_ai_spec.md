@@ -5,10 +5,12 @@
 The AI opponent is **not a separate system** — it is an input source inside the same match FSM as a human player:
 
 ```
-Human player:  touch input            →  (capId, θ, F)
-Bot player:    decideShot(gameState)  →  (capId, θ, F)
+Human player:  touch input            →  (capId, pullVector, pullLength)
+Bot player:    decideShot(gameState)  →  (capId, pullVector, pullLength)
 ```
 
+* The bot drives the SAME slingshot interface as a human: pick a cap, pull back (vector + length within MAX_PULL), release. `pullVector` = fire direction (opposite the pull), `pullLength` → power via the linear 300–1400 curve.
+* The bot's decisions must be **capture-aware**: with the ball held, the goal is to slingshot the HOLDER to shoot/pass; with the ball free, drive a cap onto it to pick it up (capture at 66px), then continue the pass chain (respecting the 3/5/∞ limit and the striker-exclusion rule).
 * Bot matches run **locally** — no networking, no relays, no server.
 * Same FSM, same physics, same win conditions as player-vs-player matches.
 * **No machine learning, no training data.** Pure deterministic logic + the game's own physics simulation.
@@ -30,9 +32,9 @@ Bot player:    decideShot(gameState)  →  (capId, θ, F)
 
 ## 3. Decision Pipeline (per turn)
 
-1. **Cap selection** — choose the cap closest to the ball / best positioned for the current objective (attack if ball on opponent half, clear if ball near own goal).
-2. **Candidate generation** — produce 20–50 candidate shot vectors (θ, F) covering: direct goal shots, passes to advancing caps, clears, and edge angles.
-3. **Evaluation** — run each candidate through the **real physics simulation** (same code as a human's shot) and score the resulting end-state.
+1. **Cap selection** — choose the cap closest to the ball / best positioned for the current objective (attack if ball on opponent half, clear if ball near own goal). When the ball is HELD, prefer the holder.
+2. **Candidate generation** — produce 20–50 candidate pull vectors (direction within MAX_PULL, length on the power curve) covering: direct goal shots, passes to advancing caps (within the pass limit), clears, and edge angles.
+3. **Evaluation** — run each candidate through the **real physics simulation** (same code as a human's shot, tether + capture included) and score the resulting end-state.
 4. **Selection** — pick the highest-scoring candidate (with tier noise applied).
 
 ### Scoring function (draft)
