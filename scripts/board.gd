@@ -11,6 +11,7 @@ const BALL_MASS := 0.5                  # light ball: struck by cap, doesn't sho
 
 var caps: Array[RigidBody2D] = []
 var ball: RigidBody2D
+var walls: StaticBody2D
 
 # Formation: 5 caps per side (x, y) — default balanced. Attacking/Defending
 # variants land here in the pre-match step (SRS 02 §2).
@@ -30,6 +31,7 @@ const FORMATION_TOP := [
 ]
 
 func _ready() -> void:
+	_build_pitch_visual()   # render layer first — behind all physics bodies
 	_build_walls()
 	_spawn_caps()
 	_spawn_ball()
@@ -37,8 +39,20 @@ func _ready() -> void:
 
 # --- construction -----------------------------------------------------------
 
+func _build_pitch_visual() -> void:
+	var visual := Node2D.new()
+	visual.name = "PitchVisual"
+	visual.set_script(load("res://scripts/pitch_draw.gd"))
+	add_child(visual)
+	# soft drop shadows under all pieces — added before caps/ball so they
+	# render beneath; drawn in board space so they don't rotate with pieces.
+	var shadows := Node2D.new()
+	shadows.name = "ShadowLayer"
+	shadows.set_script(load("res://scripts/shadow_layer.gd"))
+	add_child(shadows)
+
 func _build_walls() -> void:
-	var walls := StaticBody2D.new()
+	walls = StaticBody2D.new()
 	walls.name = "Walls"
 	add_child(walls)
 
@@ -75,13 +89,37 @@ func _build_walls() -> void:
 			post.position = Vector2(px, py)
 			add_child(post)
 
+	# goal pockets: side + back walls behind each goal mouth so caps and the
+	# ball can NEVER leave the table (the 160px mouth is wider than a cap).
+	var gx0 := PITCH.x / 2.0 - half_gap
+	var gx1 := PITCH.x / 2.0 + half_gap
+	var pd := 36.0     # pocket depth
+	var tw := 20.0     # wall thickness
+	# top pocket (y < 0)
+	_add_wall_rect(Rect2(gx0 - tw, -pd, tw, pd))
+	_add_wall_rect(Rect2(gx1, -pd, tw, pd))
+	_add_wall_rect(Rect2(gx0 - tw, -pd, (gx1 - gx0) + tw * 2.0, tw))
+	# bottom pocket (y > PITCH.y)
+	_add_wall_rect(Rect2(gx0 - tw, PITCH.y, tw, pd))
+	_add_wall_rect(Rect2(gx1, PITCH.y, tw, pd))
+	_add_wall_rect(Rect2(gx0 - tw, PITCH.y + pd - tw, (gx1 - gx0) + tw * 2.0, tw))
+
+func _add_wall_rect(rect: Rect2) -> void:
+	## Add a static wall rectangle to the shared Walls body (board-local coords).
+	var shape := RectangleShape2D.new()
+	shape.size = rect.size
+	var col := CollisionShape2D.new()
+	col.shape = shape
+	col.position = rect.position + rect.size / 2.0
+	walls.add_child(col)
+
 func _spawn_caps() -> void:
 	for i in FORMATION_BOTTOM.size():
-		caps.append(_make_cap(FORMATION_BOTTOM[i], Color(0.13, 0.55, 0.95)))  # blue bottom
+		caps.append(_make_cap(FORMATION_BOTTOM[i], Design.CAP_BLUE, Design.CAP_BLUE_INNER))  # blue bottom
 	for i in FORMATION_TOP.size():
-		caps.append(_make_cap(FORMATION_TOP[i], Color(0.95, 0.35, 0.30)))     # red top
+		caps.append(_make_cap(FORMATION_TOP[i], Design.CAP_RED, Design.CAP_RED_INNER))     # red top
 
-func _make_cap(pos: Vector2, color: Color) -> RigidBody2D:
+func _make_cap(pos: Vector2, color: Color, inner: Color) -> RigidBody2D:
 	var cap := RigidBody2D.new()
 	cap.name = "Cap"
 	cap.position = pos
@@ -92,8 +130,21 @@ func _make_cap(pos: Vector2, color: Color) -> RigidBody2D:
 	mat.friction = 1.0
 	mat.bounce = 0.05            # caps barely bounce
 	cap.physics_material_override = mat
-	var draw := _cap_draw(color)
-	cap.add_child(draw)
+	# glossy token disc (gradient shader) — below the ring
+	var disc := Node2D.new()
+	disc.name = "Disc"
+	disc.set_script(load("res://scripts/cap_disc.gd"))
+	disc.set("base_color", color)
+	disc.set("inner_color", inner)
+	cap.add_child(disc)
+	# selection ring node — kept ABOVE the disc via z_index so the disc's
+	# gradient shader never shades the gold ring. Named "Draw" because
+	# turn_manager toggles `selected` on cap.get_node("Draw").
+	var ring := Node2D.new()
+	ring.name = "Draw"
+	ring.z_index = 1
+	ring.set_script(load("res://scripts/cap_draw.gd"))
+	cap.add_child(ring)
 	var col := CollisionShape2D.new()
 	var shape := CircleShape2D.new()
 	shape.radius = CAP_RADIUS
@@ -102,28 +153,23 @@ func _make_cap(pos: Vector2, color: Color) -> RigidBody2D:
 	add_child(cap)
 	return cap
 
-func _cap_draw(color: Color) -> Node2D:
-	var d := Node2D.new()
-	d.name = "Draw"
-	d.set_script(load("res://scripts/cap_draw.gd"))
-	d.set("cap_color", color)
-	return d
-
 func _spawn_ball() -> void:
 	ball = RigidBody2D.new()
 	ball.name = "Ball"
 	ball.position = PITCH / 2.0
 	ball.mass = BALL_MASS
 	ball.continuous_cd = RigidBody2D.CCD_MODE_CAST_SHAPE  # prevent tunneling at high shot speed
+	ball.contact_monitor = true        # detect opponent touches on the held ball (release rule)
+	ball.max_contacts_reported = 8
 	ball.linear_damp = 0.5       # ball glides (SRS 01: gliding caps/ball)
 	ball.angular_damp = 0.5
 	var mat := PhysicsMaterial.new()
 	mat.friction = 0.8
 	mat.bounce = 0.7
 	ball.physics_material_override = mat
-	var draw := Node2D.new()
-	draw.set_script(load("res://scripts/ball_draw.gd"))
-	ball.add_child(draw)
+	var disc := Node2D.new()
+	disc.set_script(load("res://scripts/ball_disc.gd"))
+	ball.add_child(disc)
 	var col := CollisionShape2D.new()
 	var shape := CircleShape2D.new()
 	shape.radius = BALL_RADIUS
