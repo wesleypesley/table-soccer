@@ -11,7 +11,14 @@ const PITCH := Vector2(720.0, 1080.0)
 const GOAL_WIDTH := 160.0                    # centered on top/bottom
 const CAP_RADIUS := 44.0
 const BALL_RADIUS := 22.0
-const WALL_THICKNESS := 20.0
+const WALL_THICKNESS := 20.0                 # VISUAL rail thickness (pitch_draw)
+## PHYSICS-ONLY wall depth. Collision walls keep their inner face exactly where
+## WALL_THICKNESS puts it — every bounce is geometrically identical — but extend
+## this far OUTWARD, away from the pitch, where nothing is drawn.
+## Sized against measured worst-case travel: a wall-rebound double-hit drives the
+## ball 89 px in a single physics step (tests/run.gd `wall_double`), which a
+## 20 px wall cannot stop. Depth must exceed that plus the ball diameter.
+const WALL_COLLISION_DEPTH := 240.0
 const GOAL_POST_RADIUS := 14.0
 const CAPTURE_DIST := CAP_RADIUS + BALL_RADIUS   # 66 — ball sticks on contact
 
