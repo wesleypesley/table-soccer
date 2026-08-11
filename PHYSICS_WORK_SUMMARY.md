@@ -20,8 +20,9 @@ fixed on the strength of "it looks right".
 | P6 | Cap-facing reset | Not built, per brief |
 | P7 | 3-strike forfeit final score | **Done** + a second bug found and fixed |
 
-Two bugs were found that are **not** in the brief's list. One is fixed
-(cumulative timeout counter); one is open and needs a decision (tether drift).
+Three bugs were found that are **not** in the brief's list. One is fixed
+(cumulative timeout counter); two are open and need a decision — the tether
+drift (§6) and the goal pocket (§7). Open decisions are collected in §11.
 
 ---
 
@@ -217,7 +218,61 @@ the user. Reported with measurements instead of patched on a hunch.
 
 ---
 
-## 7. Everything deliberately not done
+## 7. New bug — the goal pocket cannot fit the ball (OPEN)
+
+Not in the brief. Found while measuring P3, and it is a live bug at the current
+`bounce = 0.7`.
+
+`detect_goal()` requires the ball **centre** to reach `y < 0`. But the pocket's
+clear depth is `pd(36) − tw(20) = **16px**`, while the ball radius is **22px**.
+A ball at rest inside the goal therefore sits at **y = +6.0** — it physically
+cannot get behind the goal line and stay there.
+
+Goals only register during the transient frame in which the ball is
+*penetrating the pocket's back wall*:
+
+| shot power | ball peak | min ball y | scored? |
+| ---: | ---: | ---: | :--- |
+| 1400 | 2303 | −20.08 | YES |
+| 1100 | 1810 | −3.51 | YES (2–3px margin) |
+| 900 | 1481 | −2.41 | YES (2–3px margin) |
+| 700 | 1152 | **+1.65** | **NO** |
+
+**A soft shot that rolls into the goal and stops does not count.** Scoring
+currently depends on a solver artefact, with a 2–3px margin at mid power.
+
+Reproduce: `godot --headless tests/run.tscn -- goal 700`
+
+Not fixed — see §11, question 1.
+
+---
+
+## 8. P3 — restitution 0.7 → 0.3, measured (AWAITING DECISION)
+
+Measured by temporarily setting `bounce = 0.3`, running the full suite, then
+reverting. The brief predicted "shots die faster, rebounds weaker". It is more
+than that: **the puck-to-ball kick is itself a restitution event**, so lowering
+the ball's bounce weakens every shot at the source.
+
+| | 0.7 | 0.3 |
+| :--- | ---: | ---: |
+| ball peak off the kick | 2303.1 | **1771.1** (−23%) |
+| pass completes | yes (f8) | yes (f10) |
+| capture / tether orbit | 66.00 | 66.00 |
+| goal from 634px | scores | **fails** |
+| double-hit peak | 3211.8 (over clamp) | 1795.1 (under clamp) |
+
+Capture and passing survive unharmed. Two notes that matter for the decision:
+
+- The goal failure at 0.3 is **not** caused by restitution directly — it lowers
+  impact speed, which drops penetration below the accidental threshold in §7.
+  Fixing §7 changes this row, and probably makes 0.3 much cheaper than it looks.
+- 0.3 would independently have suppressed the P1/P5 escape: peak energy in the
+  double-hit falls below `MAX_BALL_SPEED` entirely.
+
+---
+
+## 9. Everything deliberately not done
 
 | Item | Why |
 | :--- | :--- |
@@ -230,7 +285,7 @@ the user. Reported with measurements instead of patched on a hunch.
 
 ---
 
-## 8. Environment note
+## 10. Environment note
 
 The godot-ai MCP bridge is **not** required for physics work and is not used
 here. It drives a live editor for screenshots; physics runs headless without it.
@@ -244,3 +299,45 @@ One environment trap worth knowing: **a GDScript parse error leaves the scene
 scriptless, so nothing calls `quit()` and the process hangs forever** rather
 than erroring out. `run_all.sh` runs every case under a timeout and writes to a
 file, because a pipe loses its buffer on SIGTERM and you see nothing at all.
+
+---
+
+## 11. Open decisions — questions for the user
+
+Four things are blocked on a decision. None should be made unilaterally: each
+either changes game feel, changes visible geometry, or touches the §2 core.
+
+### Q1 — Goal pocket: how should scoring be fixed? *(recommended first)*
+
+The ball cannot fit behind the goal line (§7).
+
+- **(a) Deepen the pocket** so clear depth > `BALL_RADIUS`. Geometrically
+  correct and keeps `detect_goal`'s documented "centre crosses the line" rule.
+  Changes **visible** goal depth, so per brief §5.1 it needs a `Design` token
+  that the renderer follows — `pitch_draw.gd:147-148` currently hardcodes
+  `pd = 36.0` / `tw = 20.0`, duplicating the physics values.
+- **(b) Loosen `detect_goal()`** to fire on the ball's leading edge instead of
+  its centre. No visual change, but it redefines what a goal is.
+
+Recommended first because it is a plain gameplay bug in normal play, **and its
+answer changes the answer to Q2.**
+
+### Q2 — P3: apply restitution 0.3?
+
+Data in §8. Worth deciding **after** Q1, since the goal row is the main cost and
+Q1 changes it.
+
+### Q3 — P1's remaining 27px clipping: which remedy?
+
+Ball centre reaches x=5.01 where contact geometry says 32.0 (§2). Options, each
+with a cost: raise `physics_ticks_per_second` 60 → 120 (halves per-frame travel,
+doubles physics CPU, subtly shifts damping); tune solver contact bias (global
+engine behaviour); or lower `MAX_BALL_SPEED` (direct feel change).
+
+### Q4 — Tether drift: fix it, or accept it?
+
+Orbit holds 66.00 exactly when parked but drifts to 76.34 while the holder
+glides (§6), so the ball sits ~77px out after every real pass. Fixing it means
+touching the §2 core mechanic, which has a documented history of failed
+approaches. Accepting it means updating §3 of the brief, since the "66px orbit"
+invariant is only true for a stationary holder.
