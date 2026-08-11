@@ -222,7 +222,7 @@ func _case_wall_max() -> void:
 
 	_row("launch_speed", "%.1f px/s" % tm.BALL_SPEED_MAX)
 	_row("ball_peak_speed", "%.1f px/s" % peak)
-	_row("speed_cap", "%.1f px/s" % tm.MAX_BALL_SPEED)
+	_row("speed_cap", "none (CCD, MAX_BALL_SPEED removed 2026-08-11)")
 	_row("first_impact_min_x", "%.2f px" % first_min_x)
 	_row("overall_min_x", "%.2f px" % min_x)
 	_row("expected_min_x", "%.2f px" % BALL_MIN_X)
@@ -282,8 +282,8 @@ func _case_wall_double() -> void:
 
 	_row("ball_peak_speed", "%.1f px/s" % peak)
 	_row("peak_at_frame", peak_frame)
-	_row("speed_cap", "%.1f px/s" % tm.MAX_BALL_SPEED)
-	_row("peak_EXCEEDS_cap", "YES" if peak > tm.MAX_BALL_SPEED + 1.0 else "NO")
+	_row("speed_cap", "none (CCD, MAX_BALL_SPEED removed 2026-08-11)")
+	_row("peak_EXCEEDS_cap", "NO — no cap exists; CCD prevents tunnel")
 	_row("wall_bounces", hits)
 	_row("min_ball_x", "%.2f px" % min_x)
 	_row("expected_min_x", "%.2f px" % BALL_MIN_X)

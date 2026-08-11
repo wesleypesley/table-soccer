@@ -19,12 +19,15 @@ const CAP_RADIUS := Design.CAP_RADIUS
 const BALL_RADIUS := Design.BALL_RADIUS
 const CAPTURE_DIST := Design.CAPTURE_DIST            # 66 px — ball sticks on contact
 const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = lost ball
+# --- striker follow-through --------------------------------------------------
+# After the launcher kicks the ball, its linear_damp is raised to STRIKE_DAMP
+# so the ENGINE bleeds its speed (drag force, same method as the tether) —
+# simulates the player's hand stopping the rod after the shot. Caps' normal
+# glide damp is 1.0 (board.gd); 10 ≈ the old 0.85/frame multiplier (0.85^60/s).
+const STRIKE_DAMP := 10.0
 const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
-const MOMENTUM_CARRY := 0.15                      # cap+ball glide together after a hard pass
-const MAX_BALL_SPEED := 2600.0                    # tunnel guard: 43 px/frame < 64px (wall 20 + ball 44)
-const HELD_BALL_SPEED := 1500.0                   # held ball can't exceed — 25px/frame < 44px cap radius, so it can never skip past a cap (phase-through guard)
 
 # --- tuning margins ----------------------------------------------------------
 # Previously bare literals repeated at the call sites. Values are unchanged;
@@ -63,10 +66,8 @@ var _aim_start := Vector2.ZERO
 var _aim_current := Vector2.ZERO
 var _preview: Line2D
 var _flight_time := 0.0                 # seconds since launch
-var _brake_timer := 0.0                 # striker follow-through brake delay
 var _struck := false                    # launcher has physically kicked the ball
 const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
-const STRIKE_BRAKE_DELAY := 0.02       # 1 frame to contact the ball, then bleed speed
 
 signal turn_changed(player: int)
 signal match_over(winner: int)
@@ -92,6 +93,9 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	state = State.TURN_START
 	turn_timer = TURN_SECONDS
 	passes_left = pass_limit
+	# restore the launcher's glide damp if the follow-through brake raised it
+	if _launcher != null and is_instance_valid(_launcher):
+		_launcher.linear_damp = 1.0
 	_launcher = null
 	_ball_in_flight = false
 	if _selected_cap != null and is_instance_valid(_selected_cap):
@@ -148,9 +152,11 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 				else Vector2(0, ATTACH_FALLBACK_OFFSET)
 	_hold_offset = rel.normalized() * CAPTURE_DIST
 	board.ball.position = cap.position + _hold_offset
-	# Plato momentum carry: the arriving ball shoves the receiver — cap + ball
-	# glide together (feel-tuned; pure mass ratio would be invisible at 30:1).
-	cap.linear_velocity = incoming_vel * MOMENTUM_CARRY
+	# Option B (2026-08-11): NO momentum-carry velocity write. The glide the
+	# player feels after catching a pass is the RECEIVER's own follow-through
+	# — the cap is already moving from the player's slingshot, and the engine
+	# keeps integrating that motion. The ball's momentum isn't added on top;
+	# that was a magic constant (0.15) guessing at feel. Physics does it.
 
 func _untether() -> void:
 	## Drop the collision exception between ball and holder.
@@ -191,7 +197,6 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	holder.apply_central_impulse(d * speed * holder.mass)
 	state = State.FLIGHT
 	_flight_time = 0.0
-	_brake_timer = STRIKE_BRAKE_DELAY
 	print("[Turn] P%d slingshots cap %d dir=%s speed=%.0f" % [active_player, board.caps.find(holder), d, speed])
 
 # --- input ------------------------------------------------------------------
@@ -336,34 +341,33 @@ func _update_preview() -> void:
 
 func _physics_process(delta: float) -> void:
 	var ball: RigidBody2D = board.ball
-	# Wall-tunnel guard: a fast cap can double-hit the ball (ball bounces off
-	# the wall back into the oncoming cap, which re-kicks it into the wall at
-	# ~2x speed). Above ~3840 px/s the ball crosses wall(20px)+diameter(44px)
-	# in a single physics frame and escapes the pitch. Clamp so it can't.
-	if ball.linear_velocity.length() > MAX_BALL_SPEED:
-		ball.linear_velocity = ball.linear_velocity.normalized() * MAX_BALL_SPEED
-	# striker follow-through brake — engages only AFTER the launcher has actually
-	# KICKED the ball (ball in motion), then keeps bleeding the striker's speed
-	# even after the pass is caught, so it can't cannonball into the receiver.
-	# Gated on _struck, NOT a timer: the launcher must always be able to close
-	# the gap to the ball first, however slow the shot (fixes low-speed passes
-	# dying at spawn because the brake killed the puck mid-approach).
+	# No wall-tunnel clamp: the ball runs CCD (continuous_cd = CAST_SHAPE,
+	# board.gd) — the ENGINE prevents tunneling at any speed, verified by the
+	# wall_max / wall_double harness cases (removed MAX_BALL_SPEED 2026-08-11).
+	# striker follow-through: when the launcher has physically KICKED the ball
+	# (ball in motion), raise its linear_damp once — the ENGINE bleeds the
+	# striker's speed with a real drag force (same method as the tether
+	# spring), simulating the player's hand stopping the rod after the shot.
+	# No per-frame velocity math, no timer: damp 1.0 (glide) -> STRIKE_DAMP
+	# (stop) on the strike event, restored when the turn resets. Gated on
+	# _struck, NOT a timer: the launcher must always be able to close the gap
+	# to the ball first, however slow the shot (fixes low-speed passes dying
+	# at spawn because the brake killed the puck mid-approach).
 	if _launcher != null and _ball_in_flight:
 		if ball.linear_velocity.length() > 40.0:
 			_struck = true
-		if _struck:
-			if _brake_timer > 0.0:
-				_brake_timer -= delta
-			elif _launcher.linear_velocity.length() > 120.0:
-				_launcher.linear_velocity *= 0.85
+		if _struck and _launcher.linear_damp < STRIKE_DAMP:
+			_launcher.linear_damp = STRIKE_DAMP
 	# TETHER: the held ball is a REAL body that orbits the cap. A custom
 	# spring force (F = k·(rest−dist) − c·rel_v along the holder→ball axis)
 	# is applied to BOTH bodies every physics frame — the engine integrates
 	# it, no position writes, no per-frame projection. The force is purely
 	# radial, so tangential velocity is preserved = the orbit emerges. The
 	# damping term absorbs shove energy, so a hard ram settles after a few
-	# swings instead of rattling. A held-ball speed cap guarantees the ball
-	# can't move far enough per frame to skip past a cap's collision shape.
+	# swings instead of rattling. No speed clamp: the damper (c·rel_v) bounds
+	# the held ball's speed naturally — at 1500 px/s relative it applies
+	# ~54,000 px/s² deceleration (removed HELD_BALL_SPEED 2026-08-11, verified
+	# by the ram test).
 	if holder != null and not _ball_in_flight:
 		var rel: Vector2 = ball.position - holder.position
 		var dist := rel.length()
@@ -375,8 +379,6 @@ func _physics_process(delta: float) -> void:
 			var force := axis * (spring_f - damp_f)
 			ball.apply_central_force(force)
 			holder.apply_central_force(-force)
-		if ball.linear_velocity.length() > HELD_BALL_SPEED:
-			ball.linear_velocity = ball.linear_velocity.normalized() * HELD_BALL_SPEED
 		ball.angular_velocity = 0.0
 		# Release rule: an opponent cap touching the HOLDER (or the ball — see
 		# _on_ball_body_entered) breaks the tether: possession is lost.
@@ -403,7 +405,6 @@ func _physics_process(delta: float) -> void:
 				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + CAPTURE_TOLERANCE:
 			_ball_in_flight = true
 			_flight_time = 0.0   # grace restarts: cap still has to close the gap
-			_brake_timer = STRIKE_BRAKE_DELAY
 			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
 			return
 		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
