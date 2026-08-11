@@ -36,14 +36,13 @@ const CONTACT_SLOP := 6.0          # cap-to-cap touch test for the release rule
 const ATTACH_MIN_REL := 30.0       # shorter arrival vectors are too degenerate to aim with
 const ATTACH_FALLBACK_OFFSET := 34.0  # stick offset used when the arrival vector is unusable
 
-# --- tether orbit sweep ------------------------------------------------------
-const SWEEP_STEPS := 34             # candidate points tried around the orbit circle
-const SWEEP_STEP_RAD := 0.1         # ~5.7° between candidates → covers the full circle
-## Ball-CENTRE bounds for testing an orbit candidate against the walls. Keeps
-## the original, deliberately conservative wall-thickness + ball-radius margin.
-const BALL_BOUND_MIN := Design.WALL_THICKNESS + Design.BALL_RADIUS   # 42
-const BALL_BOUND_MAX_X := Design.PITCH.x - BALL_BOUND_MIN            # 678
-const BALL_BOUND_MAX_Y := Design.PITCH.y - BALL_BOUND_MIN            # 1038
+# --- tether spring -----------------------------------------------------------
+# Custom spring (community-validated over DampedSpringJoint2D — see skill
+# references/godot-joint2d-pitfalls.md): F = k·(rest−dist) − c·rel_v applied
+# as forces on both bodies. The engine integrates it; tangential velocity is
+# untouched (force is purely radial) so the orbit emerges from physics.
+const TETHER_STIFFNESS := 200.0     # spring constant k — ball tracks a gliding cap, no whip
+const TETHER_DAMPING := 18.0        # damping c ≈ 2·√(k·m_ball) — near-critical, few bounces
 
 var board: Node2D
 var state: int = State.TURN_START
@@ -357,62 +356,27 @@ func _physics_process(delta: float) -> void:
 				_brake_timer -= delta
 			elif _launcher.linear_velocity.length() > 120.0:
 				_launcher.linear_velocity *= 0.85
-	# TETHER: the held ball is a REAL body that orbits the cap. Each frame we
-	# project it back onto the contact circle (hard constraint — keeps the ball
-	# glued to its owner, never through the holder) and cancel only the RADIAL
-	# velocity, preserving tangential motion = the orbit. Crucially the
-	# projection is SKIPPED when the path to the circle is blocked by another
-	# cap or a wall (test_move) — then the physics solver handles the real
-	# collision and the ball genuinely rebounds instead of phasing through the
-	# blocker. A held-ball speed cap guarantees the ball can't move far enough
-	# per frame to skip past a cap's collision shape.
+	# TETHER: the held ball is a REAL body that orbits the cap. A custom
+	# spring force (F = k·(rest−dist) − c·rel_v along the holder→ball axis)
+	# is applied to BOTH bodies every physics frame — the engine integrates
+	# it, no position writes, no per-frame projection. The force is purely
+	# radial, so tangential velocity is preserved = the orbit emerges. The
+	# damping term absorbs shove energy, so a hard ram settles after a few
+	# swings instead of rattling. A held-ball speed cap guarantees the ball
+	# can't move far enough per frame to skip past a cap's collision shape.
 	if holder != null and not _ball_in_flight:
-		if ball.linear_velocity.length() > HELD_BALL_SPEED:
-			ball.linear_velocity = ball.linear_velocity.normalized() * HELD_BALL_SPEED
 		var rel: Vector2 = ball.position - holder.position
 		var dist := rel.length()
 		if dist > 0.01:
-			var base_angle := rel.angle()
-			# Find the nearest CLEAR point on the orbit circle. Try the direct
-			# angle first, then sweep around the FULL circle in small
-			# alternating steps so the ball slides around any cap blocking the
-			# orbit path (real rebound, no phase-through) and returns to its
-			# 66px orbit instead of parking against the blocker. A short sweep
-			# (~±46°) let the ball decouple: when the clear side was further
-			# out, nothing re-placed it and it froze at the wrong radius.
-			var placed := false
-			for sweep in range(SWEEP_STEPS):
-				var a := base_angle
-				if sweep > 0:
-					var dir_sign := 1.0 if sweep % 2 == 1 else -1.0
-					a += dir_sign * (float(sweep) + 1.0) * SWEEP_STEP_RAD
-				var cand := holder.position + Vector2.from_angle(a) * CAPTURE_DIST
-				var blocked := false
-				for i in board.caps.size():
-					var c: RigidBody2D = board.caps[i]
-					if c == holder:
-						continue
-					if cand.distance_to(c.position) < CAPTURE_DIST:
-						blocked = true
-						break
-				if not blocked and (cand.x < BALL_BOUND_MIN or cand.x > BALL_BOUND_MAX_X \
-						or cand.y < BALL_BOUND_MIN or cand.y > BALL_BOUND_MAX_Y):
-					blocked = true
-				if not blocked:
-					ball.position = cand
-					placed = true
-					break
-			# Constrain velocity ONLY when the ball was re-placed on the orbit:
-			# cancel the radial component (so a shove becomes orbit instead of
-			# dragging the ball away) and preserve the tangential part = the
-			# orbit. While blocked (surrounded), velocity is left untouched so
-			# the solver's bounce-out impulse survives and the ball can return
-			# to the circle once a gap opens — freezing it at the wrong radius
-			# was the decoupling bug.
-			if placed:
-				var rel_v: Vector2 = ball.linear_velocity - holder.linear_velocity
-				var radial := rel_v.dot(rel / dist) * (rel / dist)
-				ball.linear_velocity = holder.linear_velocity + (rel_v - radial)
+			var axis := rel / dist
+			var rel_v: Vector2 = ball.linear_velocity - holder.linear_velocity
+			var spring_f := TETHER_STIFFNESS * (CAPTURE_DIST - dist)
+			var damp_f := TETHER_DAMPING * rel_v.dot(axis)
+			var force := axis * (spring_f - damp_f)
+			ball.apply_central_force(force)
+			holder.apply_central_force(-force)
+		if ball.linear_velocity.length() > HELD_BALL_SPEED:
+			ball.linear_velocity = ball.linear_velocity.normalized() * HELD_BALL_SPEED
 		ball.angular_velocity = 0.0
 		# Release rule: an opponent cap touching the HOLDER (or the ball — see
 		# _on_ball_body_entered) breaks the tether: possession is lost.
