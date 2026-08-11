@@ -20,10 +20,18 @@ const BALL_RADIUS := Design.BALL_RADIUS
 const CAPTURE_DIST := Design.CAPTURE_DIST            # 66 px — ball sticks on contact
 const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = lost ball
 # --- striker follow-through --------------------------------------------------
-# After the launcher kicks the ball, its linear_damp is raised to STRIKE_DAMP
-# so the ENGINE bleeds its speed (drag force, same method as the tether) —
-# simulates the player's hand stopping the rod after the shot. Caps' normal
-# glide damp is 1.0 (board.gd); 10 ≈ the old 0.85/frame multiplier (0.85^60/s).
+# After the launcher kicks the ball, its linear_damp is raised so the ENGINE
+# bleeds its speed (drag force, same method as the tether spring) — simulates
+# the player's hand stopping the rod after the shot. STRIKE_DAMP = 10 matches
+# the OLD 0.85/frame multiplier (1/(1+10/60) ≈ 0.857/frame vs 0.85). Two gates
+# replicate the old brake's behavior exactly:
+#  1. SEPARATION: the brake only engages once the launcher has finished
+#     pushing the ball — launcher farther than CAPTURE_DIST+TOLERANCE from
+#     the ball (the old code reset its brake timer every frame the launcher
+#     stayed within 78px of the ball, so follow-through always completed
+#     first; braking mid-kick was the "abrupt stop" bug).
+#  2. >120 px/s: brake above it, glide (damp 1.0) below — the striker coasts
+#     out instead of dead-stopping.
 const STRIKE_DAMP := 10.0
 const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
@@ -134,6 +142,10 @@ var _hold_offset := Vector2(0, -34)             # ball's rest position relative 
 func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> void:
 	holder = cap
 	_ball_in_flight = false              # capture ENDS flight — tether engages
+	# the launcher's follow-through brake must NOT leak into the next slingshot:
+	# restore its glide damp before clearing it
+	if _launcher != null and is_instance_valid(_launcher):
+		_launcher.linear_damp = 1.0
 	_launcher = null                     # striker no longer excluded; brake off
 	_struck = false
 	# Option A: the ball stays a REAL body while held — it collides with other
@@ -345,19 +357,26 @@ func _physics_process(delta: float) -> void:
 	# board.gd) — the ENGINE prevents tunneling at any speed, verified by the
 	# wall_max / wall_double harness cases (removed MAX_BALL_SPEED 2026-08-11).
 	# striker follow-through: when the launcher has physically KICKED the ball
-	# (ball in motion), raise its linear_damp once — the ENGINE bleeds the
-	# striker's speed with a real drag force (same method as the tether
-	# spring), simulating the player's hand stopping the rod after the shot.
-	# No per-frame velocity math, no timer: damp 1.0 (glide) -> STRIKE_DAMP
-	# (stop) on the strike event, restored when the turn resets. Gated on
-	# _struck, NOT a timer: the launcher must always be able to close the gap
-	# to the ball first, however slow the shot (fixes low-speed passes dying
-	# at spawn because the brake killed the puck mid-approach).
+	# (ball in motion), raise its linear_damp — the ENGINE bleeds the striker's
+	# speed with a real drag force (same method as the tether spring),
+	# simulating the player's hand stopping the rod after the shot. Same curve
+	# as the old 0.85/frame multiplier (damp 10 ≈ 0.85^60/s) with the same
+	# >120 px/s gate: above it the striker is braked, below it the damp drops
+	# back to glide (1.0) so the cap coasts out like Plato instead of dead-
+	# stopping. No per-frame velocity math, no timer. Gated on _struck, NOT a
+	# timer: the launcher must always be able to close the gap to the ball
+	# first, however slow the shot (fixes low-speed passes dying at spawn
+	# because the brake killed the puck mid-approach).
 	if _launcher != null and _ball_in_flight:
 		if ball.linear_velocity.length() > 40.0:
 			_struck = true
-		if _struck and _launcher.linear_damp < STRIKE_DAMP:
-			_launcher.linear_damp = STRIKE_DAMP
+		if _struck:
+			var separated := _launcher.position.distance_to(ball.position) > CAPTURE_DIST + CAPTURE_TOLERANCE
+			if separated and _launcher.linear_velocity.length() > 120.0:
+				if _launcher.linear_damp < STRIKE_DAMP:
+					_launcher.linear_damp = STRIKE_DAMP
+			elif _launcher.linear_damp != 1.0:
+				_launcher.linear_damp = 1.0
 	# TETHER: the held ball is a REAL body that orbits the cap. A custom
 	# spring force (F = k·(rest−dist) − c·rel_v along the holder→ball axis)
 	# is applied to BOTH bodies every physics frame — the engine integrates
@@ -413,6 +432,8 @@ func _physics_process(delta: float) -> void:
 				_lose_possession()
 			else:
 				# free reposition — turn continues, ball stays with the holder
+				if is_instance_valid(_launcher):
+					_launcher.linear_damp = 1.0
 				_launcher = null
 				state = State.TURN_START
 				print("[Turn] P%d repositions cap (ball held)" % active_player)
