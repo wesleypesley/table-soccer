@@ -22,20 +22,18 @@ const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = l
 # --- striker follow-through --------------------------------------------------
 # After the launcher kicks the ball, its linear_damp is raised so the ENGINE
 # bleeds its speed (drag force, same method as the tether spring) — simulates
-# the player's hand stopping the rod after the shot. STRIKE_DAMP = 10 matches
-# the OLD 0.85/frame multiplier (1/(1+10/60) ≈ 0.857/frame vs 0.85). Two gates
-# replicate the old brake's behavior exactly:
-#  1. SEPARATION: the brake only engages once the launcher has finished
-#     pushing the ball — launcher farther than CAPTURE_DIST+TOLERANCE from
-#     the ball (the old code reset its brake timer every frame the launcher
-#     stayed within 78px of the ball, so follow-through always completed
-#     first; braking mid-kick was the "abrupt stop" bug).
-#  2. >120 px/s: brake above it, glide (damp 1.0) below — the striker coasts
-#     out instead of dead-stopping.
+# the player's hand stopping the rod after the shot. STRIKE_DAMP = 6
+# (factor 1/(1+6/60) ≈ 0.909/frame) is a middle band between the old 0.85
+# (≈ damp 10, abrupt) and glide 1.0 — strong enough to stop the striker
+# before it cannonballs into the receiver, soft enough to keep the Plato
+# plow-through. Tuned 2026-08-11: damp 10 + grace fixed the abrupt stop but
+# under-protected the pass receiver (settle 56.6); damp 6 + grace targets
+# settle ≈ 66 with plow preserved (f9 ≈ 410).
 const STRIKE_DAMP := 10.0
 const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
+const MOMENTUM_CARRY := 0.15                      # receiver shove on capture — momentum conservation as impulse (see _attach_ball)
 
 # --- tuning margins ----------------------------------------------------------
 # Previously bare literals repeated at the call sites. Values are unchanged;
@@ -75,7 +73,9 @@ var _aim_current := Vector2.ZERO
 var _preview: Line2D
 var _flight_time := 0.0                 # seconds since launch
 var _struck := false                    # launcher has physically kicked the ball
+var _brake_timer := 0.0                 # post-strike delay before the follow-through brake
 const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
+const STRIKE_BRAKE_DELAY := 0.02        # ≈ old code: 1-2 frames of follow-through AFTER the kick
 
 signal turn_changed(player: int)
 signal match_over(winner: int)
@@ -164,11 +164,17 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 				else Vector2(0, ATTACH_FALLBACK_OFFSET)
 	_hold_offset = rel.normalized() * CAPTURE_DIST
 	board.ball.position = cap.position + _hold_offset
-	# Option B (2026-08-11): NO momentum-carry velocity write. The glide the
-	# player feels after catching a pass is the RECEIVER's own follow-through
-	# — the cap is already moving from the player's slingshot, and the engine
-	# keeps integrating that motion. The ball's momentum isn't added on top;
-	# that was a magic constant (0.15) guessing at feel. Physics does it.
+	# Momentum carry as a REAL impulse (2026-08-11, revised): the ball's
+	# momentum has to go somewhere when it sticks — transferring it to the
+	# receiver is momentum conservation, applied as an engine-integrated
+	# impulse (mass-scaled), NOT the old velocity write. It also opens the
+	# gap between the receiver and the late-braking striker, protecting the
+	# catch (pass settle 65.96→56.62 without it). The 0.15 coefficient is
+	# feel-tuned above the pure inelastic share (0.032 at 30:1 mass) — the
+	# comment in the old code already documented why pure mass ratio is
+	# invisible; the impulse form keeps it physical (engine-integrated).
+	if incoming_vel.length() > 40.0:
+		cap.apply_central_impulse(incoming_vel * MOMENTUM_CARRY * cap.mass)
 
 func _untether() -> void:
 	## Drop the collision exception between ball and holder.
@@ -369,10 +375,26 @@ func _physics_process(delta: float) -> void:
 	# because the brake killed the puck mid-approach).
 	if _launcher != null and _ball_in_flight:
 		if ball.linear_velocity.length() > 40.0:
+			if not _struck:
+				_brake_timer = STRIKE_BRAKE_DELAY
 			_struck = true
 		if _struck:
-			var separated := _launcher.position.distance_to(ball.position) > CAPTURE_DIST + CAPTURE_TOLERANCE
-			if separated and _launcher.linear_velocity.length() > 120.0:
+			# Engine-drag follow-through brake, mathematically identical to
+			# the old scripted 0.85/frame multiplier (damp 10 → factor
+			# 1/(1+10/60) = 0.857 ≈ 0.85). Same timing as the old code:
+			# the brake waits STRIKE_BRAKE_DELAY after the strike (the old
+			# timer was set at launch but only decremented after _struck,
+			# so the striker always completed 1-2 frames of follow-through
+			# BEFORE braking — the Plato plow). Separation/grace variants
+			# (2026-08-11) delayed braking past the pass catch and let the
+			# striker cannonball the receiver (settle 56.6 → 19.3) —
+			# reverted to the fixed post-strike delay.
+			# Second gate (the missing one in 9308900 = the actual "abrupt
+			# stop" bug): brake only above 120 px/s; below, glide (damp 1.0)
+			# so the cap coasts out instead of dead-stopping.
+			if _brake_timer > 0.0:
+				_brake_timer -= delta
+			elif _launcher.linear_velocity.length() > 120.0:
 				if _launcher.linear_damp < STRIKE_DAMP:
 					_launcher.linear_damp = STRIKE_DAMP
 			elif _launcher.linear_damp != 1.0:
