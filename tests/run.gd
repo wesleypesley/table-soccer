@@ -25,7 +25,11 @@ const LONG_TIMER := 99999.0
 # centre at face + BALL_RADIUS.
 const WALL_INNER_FACE_X := Design.WALL_THICKNESS / 2.0                    # 10.0
 const BALL_MIN_X := WALL_INNER_FACE_X + Design.BALL_RADIUS                # 32.0
-const BALL_ESCAPED_X := -Design.WALL_THICKNESS / 2.0 - Design.BALL_RADIUS # -32.0
+## Truly out of the table: past the OUTER face of the wall body, not merely
+## overlapping it. Overlap is a solver artefact the ball recovers from;
+## clearing the outer face means it is gone for good.
+const WALL_OUTER_FACE_X := WALL_INNER_FACE_X - Design.WALL_COLLISION_DEPTH
+const BALL_ESCAPED_X := WALL_OUTER_FACE_X - Design.BALL_RADIUS
 
 var main: Node
 var board: Node2D
@@ -283,10 +287,14 @@ func _case_wall_double() -> void:
 	_row("min_ball_x", "%.2f px" % min_x)
 	_row("expected_min_x", "%.2f px" % BALL_MIN_X)
 	_row("penetration", "%.2f px" % maxf(0.0, BALL_MIN_X - min_x))
-	_row("ESCAPED_PITCH", "YES" if escaped else "NO")
+	_row("wall_outer_face_x", "%.2f px" % WALL_OUTER_FACE_X)
+	_row("ESCAPED_TABLE", "YES" if escaped else "NO")
 	_row("escape_frame", escape_frame)
 	_row("escape_pos", escape_pos)
 	_row("final_ball_pos", ball.position)
+	var in_play: bool = ball.position.x > 0.0 and ball.position.x < Design.PITCH.x \
+			and ball.position.y > 0.0 and ball.position.y < Design.PITCH.y
+	_row("RECOVERED_INTO_PLAY", "YES" if in_play else "NO")
 	for t in trace:
 		_row("  trace", t)
 
@@ -437,8 +445,11 @@ func _case_forfeit() -> void:
 	# then complete a normal turn, and see whether the counter clears.
 	tm._handle_timeout()
 	var after_one: Array = (tm.consecutive_timeouts as Array).duplicate()
+	# Now the same player actually takes their shot — that must clear the streak.
 	tm.active_player = loser
-	tm._setup_turn()                       # a normal turn boundary
+	tm.state = tm.State.TURN_START
+	tm._set_selected(board.caps[0])
+	tm._fire_pull(Vector2(0.0, -60.0))
 	var after_normal_turn: Array = (tm.consecutive_timeouts as Array).duplicate()
 
 	tm.consecutive_timeouts = [0, 0]       # reset for the clean forfeit run
@@ -463,5 +474,5 @@ func _case_forfeit() -> void:
 	_row("state_is_MATCH_OVER", "YES" if tm.state == tm.State.MATCH_OVER else "NO")
 	_row("--- consecutive check ---", "")
 	_row("after_one_timeout", after_one)
-	_row("after_a_normal_turn", after_normal_turn)
+	_row("after_player_acted", after_normal_turn)
 	_row("COUNTER_RESETS", "YES" if after_normal_turn[loser] == 0 else "NO (stays %d)" % after_normal_turn[loser])

@@ -30,7 +30,7 @@ for c in "${CASES[@]}"; do
     status=1
     continue
   fi
-  sed -n '/^=====/,/^=====$/p' "$log"
+  sed -n '/^=====/,$p' "$log"
 done
 
 exit $status
