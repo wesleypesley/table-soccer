@@ -49,6 +49,7 @@ func _ready() -> void:
 		"wall_double":  await _case_wall_double()
 		"tether":       await _case_tether()
 		"pass_chain":   await _case_pass_chain()
+		"goal":         await _case_goal()
 		"forfeit":      await _case_forfeit()
 		_:
 			push_error("unknown case: %s" % case_name)
@@ -429,6 +430,51 @@ func _case_pass_chain() -> void:
 	_row("fsm_state", tm.state)
 	for t in trace:
 		_row("  trace", t)
+
+func _case_goal() -> void:
+	## Is a goal actually reachable with a real shot? Required by the P3
+	## checklist ("goals still reachable") and a standing regression guard:
+	## a shot from mid-pitch must cross the opponent goal line.
+	var ball: RigidBody2D = board.ball
+	var holder: RigidBody2D = board.caps[3]
+	_park_others_away([holder])
+	# Mid-pitch, shooting at the TOP goal (P0 scores when ball.y < 0).
+	_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 160.0))
+	await _step(2)
+	_capture_with(holder)
+	await _step(4)
+
+	var start_y := ball.position.y
+	var score_before: int = tm.score[0]
+	# Optional 2nd CLI arg: shot power, for probing the scoring threshold.
+	var cli := OS.get_cmdline_user_args()
+	var power: float = cli[1].to_float() if cli.size() > 1 else tm.BALL_SPEED_MAX
+	tm._launch_puck(Vector2.UP, power)
+	_row("shot_power", "%.0f px/s" % power)
+
+	var min_y := INF
+	var peak := 0.0
+	var scored_at := -1
+	for i in 300:
+		await _step(1)
+		peak = maxf(peak, ball.linear_velocity.length())
+		min_y = minf(min_y, ball.position.y)
+		if scored_at == -1 and tm.score[0] > score_before:
+			scored_at = i
+			break
+
+	_row("shot_from_y", "%.1f px" % start_y)
+	_row("distance_to_goal_line", "%.1f px" % start_y)
+	_row("ball_peak_speed", "%.1f px/s" % peak)
+	_row("min_ball_y", "%.2f px" % min_y)
+	# Clear depth behind the goal line, and where a ball resting on the pocket
+	# back wall ends up. detect_goal() needs the CENTRE to reach y < 0.
+	var pocket_clear_depth := 36.0 - Design.WALL_THICKNESS
+	_row("pocket_clear_depth", "%.1f px (ball radius %.1f)" % [pocket_clear_depth, Design.BALL_RADIUS])
+	_row("ball_rest_y_in_pocket", "%.1f px" % (Design.BALL_RADIUS - pocket_clear_depth))
+	_row("GOAL_SCORED", "YES" if scored_at != -1 else "NO")
+	_row("scored_at_frame", scored_at)
+	_row("score", tm.score)
 
 func _case_forfeit() -> void:
 	## P7: 3-strike forfeit final score. The turn timer is driven by _process,

@@ -6,7 +6,7 @@ set -uo pipefail
 GODOT="${1:-${GODOT:-$HOME/.local/bin/godot}}"
 cd "$(dirname "$0")/.."
 
-CASES=(probe wall_max wall_double tether tether_moving pass_chain forfeit)
+CASES=(probe wall_max wall_double tether tether_moving pass_chain goal forfeit)
 
 # A GDScript parse error leaves the scene scriptless, so nothing ever calls
 # quit() and the process hangs forever. Always run under a timeout, and write
