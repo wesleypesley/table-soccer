@@ -14,20 +14,36 @@ const INF_PASSES := 999
 const BALL_SPEED_SCALE := 2.0
 const BALL_SPEED_MIN := 300.0
 const BALL_SPEED_MAX := 1400.0
-const CAP_RADIUS := 44.0
-const BALL_RADIUS := 22.0
-const CAPTURE_DIST := CAP_RADIUS + BALL_RADIUS      # 66 px — ball sticks on contact
+# Geometry is NOT redefined here — Design is the single source of truth.
+const CAP_RADIUS := Design.CAP_RADIUS
+const BALL_RADIUS := Design.BALL_RADIUS
+const CAPTURE_DIST := Design.CAPTURE_DIST            # 66 px — ball sticks on contact
 const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = lost ball
 const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
-const HELD_OFFSET := Vector2(0, -34)                 # ball sits at holder's "feet" (P0: above cap)
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
 const MOMENTUM_CARRY := 0.15                      # cap+ball glide together after a hard pass
 const MAX_BALL_SPEED := 2600.0                    # tunnel guard: 43 px/frame < 64px (wall 20 + ball 44)
 const HELD_BALL_SPEED := 1500.0                   # held ball can't exceed — 25px/frame < 44px cap radius, so it can never skip past a cap (phase-through guard)
-const HALF := 540.0                                   # pitch center Y
-const PITCH_X := 720.0
-const PITCH_Y := 1080.0
+
+# --- tuning margins ----------------------------------------------------------
+# Previously bare literals repeated at the call sites. Values are unchanged;
+# only the names are new, so behaviour is identical.
+const CAPTURE_TOLERANCE := 12.0    # slop on CAPTURE_DIST for strike / capture tests
+const LAUNCH_SPAWN_GAP := 6.0      # ball spawns this far past contact so the puck kicks it
+const TAP_TOLERANCE := 6.0         # finger slop when tapping a cap to select it
+const CONTACT_SLOP := 6.0          # cap-to-cap touch test for the release rule
+const ATTACH_MIN_REL := 30.0       # shorter arrival vectors are too degenerate to aim with
+const ATTACH_FALLBACK_OFFSET := 34.0  # stick offset used when the arrival vector is unusable
+
+# --- tether orbit sweep ------------------------------------------------------
+const SWEEP_STEPS := 34             # candidate points tried around the orbit circle
+const SWEEP_STEP_RAD := 0.1         # ~5.7° between candidates → covers the full circle
+## Ball-CENTRE bounds for testing an orbit candidate against the walls. Keeps
+## the original, deliberately conservative wall-thickness + ball-radius margin.
+const BALL_BOUND_MIN := Design.WALL_THICKNESS + Design.BALL_RADIUS   # 42
+const BALL_BOUND_MAX_X := Design.PITCH.x - BALL_BOUND_MIN            # 678
+const BALL_BOUND_MAX_Y := Design.PITCH.y - BALL_BOUND_MIN            # 1038
 
 var board: Node2D
 var state: int = State.TURN_START
@@ -128,8 +144,9 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 	# Graceful stick: ball settles AT the cap's edge (contact distance), on the
 	# side it arrived from — no floating gap, no teleport through the cap.
 	var rel: Vector2 = board.ball.position - cap.position
-	if rel.length() < 30.0 or rel.length() > CAPTURE_DIST + 12.0:
-		rel = Vector2(0, -34.0) if active_player == 0 else Vector2(0, 34.0)
+	if rel.length() < ATTACH_MIN_REL or rel.length() > CAPTURE_DIST + CAPTURE_TOLERANCE:
+		rel = Vector2(0, -ATTACH_FALLBACK_OFFSET) if active_player == 0 \
+				else Vector2(0, ATTACH_FALLBACK_OFFSET)
 	_hold_offset = rel.normalized() * CAPTURE_DIST
 	board.ball.position = cap.position + _hold_offset
 	# Plato momentum carry: the arriving ball shoves the receiver — cap + ball
@@ -169,7 +186,7 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	ball.collision_mask = 1
 	ball.linear_velocity = Vector2.ZERO
 	ball.angular_velocity = 0.0
-	ball.position = holder.position + d * (CAPTURE_DIST + 6.0)
+	ball.position = holder.position + d * (CAPTURE_DIST + LAUNCH_SPAWN_GAP)
 	# impulse to the PUCK (impulse = desired velocity × mass). The puck slides
 	# forward, collides with the ball, and the ball flies — like real table soccer.
 	holder.apply_central_impulse(d * speed * holder.mass)
@@ -232,6 +249,10 @@ func _fire_pull(pull: Vector2) -> void:
 	var cap := _selected_cap
 	if cap == null:
 		return
+	# The player committed an action, so their timeout streak is broken.
+	# SRS 02 §4.F counts CONSECUTIVE timeouts; without this reset the counter
+	# only ever grows and timeouts spread across a whole match force a forfeit.
+	consecutive_timeouts[active_player] = 0
 	if cap == holder:
 		var dir := pull.normalized()
 		var speed := _pull_speed(pull)
@@ -360,11 +381,11 @@ func _physics_process(delta: float) -> void:
 			# (~±46°) let the ball decouple: when the clear side was further
 			# out, nothing re-placed it and it froze at the wrong radius.
 			var placed := false
-			for sweep in range(34):
+			for sweep in range(SWEEP_STEPS):
 				var a := base_angle
 				if sweep > 0:
 					var dir_sign := 1.0 if sweep % 2 == 1 else -1.0
-					a += dir_sign * (float(sweep) + 1.0) * 0.1   # ~5.7° steps, full circle
+					a += dir_sign * (float(sweep) + 1.0) * SWEEP_STEP_RAD
 				var cand := holder.position + Vector2.from_angle(a) * CAPTURE_DIST
 				var blocked := false
 				for i in board.caps.size():
@@ -374,8 +395,8 @@ func _physics_process(delta: float) -> void:
 					if cand.distance_to(c.position) < CAPTURE_DIST:
 						blocked = true
 						break
-				if not blocked and (cand.x < 42.0 or cand.x > 678.0 \
-						or cand.y < 42.0 or cand.y > 1038.0):
+				if not blocked and (cand.x < BALL_BOUND_MIN or cand.x > BALL_BOUND_MAX_X \
+						or cand.y < BALL_BOUND_MIN or cand.y > BALL_BOUND_MAX_Y):
 					blocked = true
 				if not blocked:
 					ball.position = cand
@@ -401,7 +422,7 @@ func _physics_process(delta: float) -> void:
 				continue
 			var team := 0 if i < 5 else 1
 			if team != active_player \
-					and cap.position.distance_to(holder.position) < CAP_RADIUS * 2.0 + 6.0:
+					and cap.position.distance_to(holder.position) < CAP_RADIUS * 2.0 + CONTACT_SLOP:
 				_lose_possession()
 				break
 	if state != State.FLIGHT:
@@ -415,7 +436,7 @@ func _physics_process(delta: float) -> void:
 		# - If the ball is HELD by another cap, the slide is a free reposition:
 		#   nothing is lost, the turn continues.
 		if _launcher != null and holder == null \
-				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
+				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + CAPTURE_TOLERANCE:
 			_ball_in_flight = true
 			_flight_time = 0.0   # grace restarts: cap still has to close the gap
 			_brake_timer = STRIKE_BRAKE_DELAY
@@ -444,7 +465,7 @@ func _physics_process(delta: float) -> void:
 		var cap: RigidBody2D = board.caps[i]
 		if cap == holder or cap == _launcher:
 			continue
-		if cap.position.distance_to(ball.position) < CAPTURE_DIST + 12.0:
+		if cap.position.distance_to(ball.position) < CAPTURE_DIST + CAPTURE_TOLERANCE:
 			var team := 0 if i < 5 else 1
 			if team == active_player and passes_left > 0:
 				passes_left -= 1
@@ -507,7 +528,10 @@ func _handle_timeout() -> void:
 	print("[Turn] P%d timeout #%d — shot forfeited" % [active_player, consecutive_timeouts[active_player]])
 	if consecutive_timeouts[active_player] >= MAX_TIMEOUTS:
 		var winner := 1 - active_player
+		# SRS 02 §4.F: an AFK forfeit is a 5-0 TECHNICAL victory. The forfeiting
+		# player's real goals are wiped — without this the HUD shows "5-2".
 		score[winner] = WIN_GOALS
+		score[active_player] = 0
 		_end_match(winner, true)
 	else:
 		_pass_turn()
@@ -525,7 +549,7 @@ func _cap_at(pos: Vector2) -> RigidBody2D:
 		var team := 0 if i < 5 else 1
 		if team != active_player:
 			continue
-		if cap.position.distance_to(pos) <= CAP_RADIUS + 6.0:
+		if cap.position.distance_to(pos) <= CAP_RADIUS + TAP_TOLERANCE:
 			return cap
 	return null
 

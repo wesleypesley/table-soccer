@@ -1,13 +1,16 @@
 extends Node2D
 ## Board: pitch walls, goals, caps and ball. Physics core per SRS 02 §4.B.
 
-const PITCH := Vector2(720.0, 1080.0)          # portrait playfield
-const GOAL_WIDTH := 160.0                      # centered on top/bottom
-const CAP_RADIUS := 44.0
-const BALL_RADIUS := 22.0
-const SLEEP_THRESHOLD := 5.0                   # px/s per SRS 02 §4.B
-const CAP_MASS := 15.0                 # caps heavy vs ball — ball barely moves them
-const BALL_MASS := 0.5                  # light ball: struck by cap, doesn't shove caps
+# Geometry and physics feel are NOT redefined here — Design is the single
+# source of truth. These aliases exist only so `board.PITCH` and friends keep
+# working for external readers (turn_manager reads board.PITCH).
+const PITCH := Design.PITCH                    # portrait playfield
+const GOAL_WIDTH := Design.GOAL_WIDTH          # centered on top/bottom
+const CAP_RADIUS := Design.CAP_RADIUS
+const BALL_RADIUS := Design.BALL_RADIUS
+const SLEEP_THRESHOLD := Design.SLEEP_THRESHOLD  # px/s per SRS 02 §4.B
+const CAP_MASS := Design.CAP_MASS      # caps heavy vs ball — ball barely moves them
+const BALL_MASS := Design.BALL_MASS    # light ball: struck by cap, doesn't shove caps
 
 var caps: Array[RigidBody2D] = []
 var ball: RigidBody2D
@@ -58,24 +61,22 @@ func _build_walls() -> void:
 
 	var half_gap := GOAL_WIDTH / 2.0
 	var wall_len := (PITCH.x - GOAL_WIDTH) / 2.0      # 280: flanking segment length
-	var segs := [
-		# left, right walls (full height)
-		[Vector2(0, PITCH.y / 2), Vector2(20, PITCH.y), 0.0],
-		[Vector2(PITCH.x, PITCH.y / 2), Vector2(20, PITCH.y), 0.0],
-		# top wall split around goal mouth: [0..280] and [440..720]
-		[Vector2(wall_len / 2.0, 0), Vector2(wall_len, 20), 0.0],
-		[Vector2(PITCH.x - wall_len / 2.0, 0), Vector2(wall_len, 20), 0.0],
-		# bottom wall split around goal mouth
-		[Vector2(wall_len / 2.0, PITCH.y), Vector2(wall_len, 20), 0.0],
-		[Vector2(PITCH.x - wall_len / 2.0, PITCH.y), Vector2(wall_len, 20), 0.0],
-	]
-	for s in segs:
-		var rect := RectangleShape2D.new()
-		rect.size = Vector2(s[1].x, s[1].y)
-		var col := CollisionShape2D.new()
-		col.shape = rect
-		col.position = Vector2(s[0].x, s[0].y)
-		walls.add_child(col)
+	# Walls are built INNER-FACE-FIRST: the face the ball actually strikes stays
+	# exactly where WALL_THICKNESS puts it (x=+10 on the left, y=+10 on top, and
+	# so on — identical to the original centred segments), and the body extends
+	# outward by WALL_COLLISION_DEPTH into off-pitch space where nothing is drawn.
+	# A 20px wall cannot stop a ball covering 89px in one physics step (measured,
+	# tests/run.gd wall_double); a deep one can. Only the outward side grew, so
+	# every bounce angle and contact point is unchanged.
+	var half_t := Design.WALL_THICKNESS / 2.0
+	var d := Design.WALL_COLLISION_DEPTH
+	# Left/right overshoot the pitch ends by `d` so the corners are sealed too.
+	_add_wall_rect(Rect2(half_t - d, -d, d, PITCH.y + d * 2.0))               # left
+	_add_wall_rect(Rect2(PITCH.x - half_t, -d, d, PITCH.y + d * 2.0))         # right
+	_add_wall_rect(Rect2(0, half_t - d, wall_len, d))                         # top L
+	_add_wall_rect(Rect2(PITCH.x - wall_len, half_t - d, wall_len, d))        # top R
+	_add_wall_rect(Rect2(0, PITCH.y - half_t, wall_len, d))                   # bottom L
+	_add_wall_rect(Rect2(PITCH.x - wall_len, PITCH.y - half_t, wall_len, d))  # bottom R
 
 	# goal posts: 4 static circles at the goal mouth corners
 	for px in [PITCH.x / 2 - half_gap, PITCH.x / 2 + half_gap]:
@@ -83,7 +84,7 @@ func _build_walls() -> void:
 			var post := StaticBody2D.new()
 			var pcol := CollisionShape2D.new()
 			var pshape := CircleShape2D.new()
-			pshape.radius = 14.0
+			pshape.radius = Design.GOAL_POST_RADIUS
 			pcol.shape = pshape
 			post.add_child(pcol)
 			post.position = Vector2(px, py)
@@ -93,16 +94,22 @@ func _build_walls() -> void:
 	# ball can NEVER leave the table (the 160px mouth is wider than a cap).
 	var gx0 := PITCH.x / 2.0 - half_gap
 	var gx1 := PITCH.x / 2.0 + half_gap
-	var pd := 36.0     # pocket depth
-	var tw := 20.0     # wall thickness
+	var pd := 36.0                       # pocket depth
+	var tw := Design.WALL_THICKNESS      # visual pocket wall thickness
+	# Same inner-face-first rule as the perimeter: the faces a ball inside the
+	# pocket can strike (x=gx0, x=gx1, and the back wall) stay put; the bodies
+	# grow outward by `d`. A goal-speed shot must not tunnel out the back.
+	var back_top := -(pd - tw)           # top pocket back wall, inner face
+	var back_bottom := PITCH.y + pd - tw # bottom pocket back wall, inner face
+	var mouth_w := (gx1 - gx0) + d * 2.0
 	# top pocket (y < 0)
-	_add_wall_rect(Rect2(gx0 - tw, -pd, tw, pd))
-	_add_wall_rect(Rect2(gx1, -pd, tw, pd))
-	_add_wall_rect(Rect2(gx0 - tw, -pd, (gx1 - gx0) + tw * 2.0, tw))
+	_add_wall_rect(Rect2(gx0 - d, -pd, d, pd))
+	_add_wall_rect(Rect2(gx1, -pd, d, pd))
+	_add_wall_rect(Rect2(gx0 - d, back_top - d, mouth_w, d))
 	# bottom pocket (y > PITCH.y)
-	_add_wall_rect(Rect2(gx0 - tw, PITCH.y, tw, pd))
-	_add_wall_rect(Rect2(gx1, PITCH.y, tw, pd))
-	_add_wall_rect(Rect2(gx0 - tw, PITCH.y + pd - tw, (gx1 - gx0) + tw * 2.0, tw))
+	_add_wall_rect(Rect2(gx0 - d, PITCH.y, d, pd))
+	_add_wall_rect(Rect2(gx1, PITCH.y, d, pd))
+	_add_wall_rect(Rect2(gx0 - d, back_bottom, mouth_w, d))
 
 func _add_wall_rect(rect: Rect2) -> void:
 	## Add a static wall rectangle to the shared Walls body (board-local coords).
