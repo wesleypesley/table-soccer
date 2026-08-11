@@ -4,6 +4,13 @@
 
 > **THE RULE, ABOVE ALL ELSE:** WATCH THE VIDEO (`Record_2026-08-05-22-04-56_b52afecc81869d1e5d72c024d8519dc3.mp4`) AND LOOK AT THE SCREENSHOTS IN THIS SAME FOLDER. The video IS the gameplay spec — the feel, the physics, the quirks. If you watched it, you know exactly how the game should play. Recreate the gameplay feel and physics from it — not from imagination.
 
+**HOW TO WORK:**
+- **USE THE GODOT 2D EDITOR VISUALLY** — screenshots + node tools. You are allowed (encouraged) to recreate the Plato look by seeing and placing, not only scripting.
+- **Design system & tokens are DYNAMIC** — update them as you design; don't follow them rigidly.
+- **NO play-testing needed** — deliver the job done in ONE pass.
+- **Take your time; do it in parts** — one section at a time.
+- **IMPORTANT — SET UP GODOT + THE MCP BRIDGE FIRST** on the machine you're working on: Godot 4.7 and the godot-ai MCP plugin must be installed and connected before you start (the visual editor workflow depends on it).
+
 -----------
 
 ## Visual / Design
