@@ -197,6 +197,8 @@ func _case_wall_max() -> void:
 	## BALL_SPEED_MAX and physically kicks the ball across the pitch.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
+	tm.release_enabled = false        # isolate wall physics — holder must
+	                                  # exist for the harness launch
 	await _park_others_away([holder])
 	_park(holder, Vector2(Design.PITCH.x - 160.0, Design.PITCH.y / 2.0))
 	await _step(2)
@@ -257,6 +259,7 @@ func _case_wall_double() -> void:
 	## Holder is parked close to the wall so the rebound meets the puck.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
+	tm.release_enabled = false        # isolate wall physics (same as wall_max)
 	await _park_others_away([holder])
 	# Close to the wall: puck centre one cap-radius + margin off the face.
 	_park(holder, Vector2(WALL_INNER_FACE_X + Design.CAP_RADIUS + OUTFIELD_CONTACT + 20.0,
@@ -322,6 +325,10 @@ func _case_tether() -> void:
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
 	var mate: RigidBody2D = board.caps[4]           # OWN team, so no release rule
+	tm.active_player = 0              # keep the mate a teammate — the random
+	                                  # kickoff would flake the release rule
+	tm.release_enabled = false        # isolate the HELD phase — release gets
+	                                  # its own case (_case_facing covers it live)
 	await _park_others_away([holder, mate])
 	# Holder is parked clear of the ball spawn: parking a cap ON the ball makes
 	# the solver eject it and every measurement after that is noise.
@@ -367,6 +374,7 @@ func _case_tether_moving() -> void:
 	## HOLDER is gliding instead of parked. Nothing else differs from _case_tether.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
+	tm.release_enabled = false        # isolate the HELD phase (same as tether)
 	await _park_others_away([holder])
 	_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 160.0))
 	await _step(2)
@@ -401,6 +409,10 @@ func _case_pass_chain() -> void:
 	var ball: RigidBody2D = board.ball
 	var passer: RigidBody2D = board.caps[3]
 	var receiver: RigidBody2D = board.caps[4]
+	tm.active_player = 0              # passer/receiver are team-0 caps; the
+	                                  # random kickoff would flake this case
+	tm.release_enabled = false        # isolate pass+capture+orbit — release
+	                                  # has its own live case
 	await _park_others_away([passer, receiver])
 	_park(passer, Vector2(200.0, Design.PITCH.y / 2.0))
 	_park(receiver, Vector2(200.0 + 320.0, Design.PITCH.y / 2.0))
@@ -463,6 +475,8 @@ func _case_goal() -> void:
 	## a shot from mid-pitch must cross the opponent goal line.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
+	tm.release_enabled = false        # isolate launch+goal physics — the holder
+	                                  # must still exist for the harness launch
 	await _park_others_away([holder])
 	# Mid-pitch, shooting at the TOP goal (P0 scores when ball.y < 0).
 	_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 160.0))
@@ -621,8 +635,11 @@ func _case_kickoff() -> void:
 	_row("win_goals", tm.WIN_GOALS)
 
 func _case_facing() -> void:
-	## A cap holding the ball turns to face the goal it is attacking (Plato).
-	## Checked for BOTH sides, since they attack opposite ends.
+	## A cap holding the ball SWINGS AROUND THE BALL to face the goal it
+	## attacks (Plato): input locked while swinging, the swing waits for the
+	## holder to ride out any shove, then the cap orbits the ball to sit
+	## behind it, badge toward the goal. Both sides checked, since they
+	## attack opposite ends.
 	var results: Array[String] = []
 	var ok := true
 	for player in [0, 1]:
@@ -636,16 +653,53 @@ func _case_facing() -> void:
 		await _step(1)
 		await _park_others_away([holder])
 		await _step(2)
+		# Ball sticks on the SIDE (off the goal line) so the swing is real:
+		# 66px at 60° off the goal axis. body_set_state — the ball may be awake.
+		var ball_off := Vector2(57.2, -33.0 if player == 0 else 33.0)
+		PhysicsServer2D.body_set_state(board.ball.get_rid(),
+				PhysicsServer2D.BODY_STATE_TRANSFORM,
+				Transform2D(0.0, board.to_global(holder.position + ball_off)))
 		_capture_with(holder)
-		await _step(6)
-
-		# The goal this player attacks, and the direction the cap should point.
+		# 1) input lock: select must be rejected the moment possession lands
+		tm._handle_press(holder.position, true)
+		var locked: bool = tm._selected_cap == null
+		if not locked:
+			ok = false
+		tm._set_selected(null)
+		tm._pulling = false
+		# 2) ride-out gate: ram the holder THE SAME FRAME it catches (before
+		# the swing can start); the badge must NOT turn while it slides
+		var rot_before: float = holder.rotation
+		holder.apply_central_impulse(Vector2(150.0 * holder.mass, 0.0))
+		var rode_out := true
+		for f in 20:
+			await _step(1)
+			if holder.linear_velocity.length() > 15.0 \
+					and absf(angle_difference(rot_before, holder.rotation)) > 0.05:
+				rode_out = false
+		# 3) once stopped, the swing completes (cap behind the ball), then the
+		#    pair settles and the tether RELEASES (Plato ownership: the ball is
+		#    free until any cap strikes it again) — input unlocks via release.
+		var rot: float = holder.rotation
+		var finished := false
+		for f in 300:                 # up to 5s (ride-out + swing + settle)
+			await _step(1)
+			rot = holder.rotation
+			if not tm._facing:
+				finished = true
+				break
+		# the cap moved around the ball — target angle from its FINAL position
 		var goal := Vector2(Design.PITCH.x / 2.0, 0.0 if player == 0 else Design.PITCH.y)
 		var want := (goal - holder.position).angle() + PI / 2.0
-		var err := absf(angle_difference(holder.rotation, want))
-		if err > 0.01:
+		var err := absf(angle_difference(rot, want))
+		if err > 0.10 or not finished or not rode_out or not locked:
 			ok = false
-		results.append("P%d rot=%.3f want=%.3f err=%.4f" % [player, holder.rotation, want, err])
+		results.append("P%d rot=%.3f want=%.3f err=%.4f locked=%s rode_out=%s done=%s released=%s dist=%.1f"
+				% [player, rot, want, err, locked, rode_out, finished, tm.holder == null,
+					board.ball.position.distance_to(holder.position)])
+		_row("  P%d_ball_free_after_settle" % player, "YES" if tm.holder == null else "NO")
+		_row("  P%d_ball_rest_dist" % player, "%.1f px (contact %.1f)" % [
+				board.ball.position.distance_to(holder.position), OUTFIELD_CONTACT])
 		tm._lose_possession()
 		await _step(2)
 

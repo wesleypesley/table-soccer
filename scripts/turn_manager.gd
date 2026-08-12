@@ -19,7 +19,6 @@ const CAP_RADIUS := Design.CAP_RADIUS
 const BALL_RADIUS := Design.BALL_RADIUS
 const CAPTURE_DIST := Design.CAPTURE_DIST            # 66 px — ball sticks on contact
 const STOP_THRESHOLD := 8.0                          # px/s — ball stopped = lost ball
-const PASS_CONE := 0.5                               # rad (~29°) half-angle for pass targeting
 const MAX_PASS_DIST := 500.0
 const MAX_PULL := 150.0                           # max slingshot pull-back (px)
 const MOMENTUM_CARRY := 0.15                      # receiver shove on capture — momentum conservation as impulse (see _attach_ball)
@@ -27,7 +26,7 @@ const MOMENTUM_CARRY := 0.15                      # receiver shove on capture �
 # --- tuning margins ----------------------------------------------------------
 # Previously bare literals repeated at the call sites. Values are unchanged;
 # only the names are new, so behaviour is identical.
-const CAPTURE_TOLERANCE := 12.0    # slop on CAPTURE_DIST for strike / capture tests
+const ATTACH_SLOP := 12.0      # attach-placement sanity: arrival vector must be near contact
 const LAUNCH_SPAWN_GAP := 6.0      # ball spawns this far past contact so the puck kicks it
 const TAP_TOLERANCE := 6.0         # finger slop when tapping a cap to select it
 const CONTACT_SLOP := 6.0          # cap-to-cap touch test for the release rule
@@ -41,6 +40,24 @@ const ATTACH_FALLBACK_OFFSET := 34.0  # stick offset used when the arrival vecto
 # untouched (force is purely radial) so the orbit emerges from physics.
 const TETHER_STIFFNESS := 200.0     # spring constant k — ball tracks a gliding cap, no whip
 const TETHER_DAMPING := 18.0        # damping c ≈ 2·√(k·m_ball) — near-critical, few bounces
+
+# --- holder facing (Plato) ---------------------------------------------------
+# When a cap catches the ball it SWINGS AROUND THE BALL to sit behind it,
+# facing the goal it attacks (ball between cap and goal, badge toward the
+# goal). The cap's centre orbits the ball — no self-spin — driven by a
+# velocity write toward the target point on the orbit circle, so caps in the
+# arc get shoved and a wall really stops it (nothing phases). The swing only
+# starts once the cap has ridden out any shove (speed gate), and a mid-swing
+# shove freezes it until the cap settles again. Player input stays locked
+# until the swing completes or gives up.
+const FACING_STOP_SPEED := 15.0     # px/s — below this the cap is "stopped", the swing may start
+const FACING_ORBIT_SPEED := 220.0   # px/s — max swing speed (~0.3s to cross 66px)
+const FACING_ORBIT_GAIN := 3.0      # swing speed = gap to target × gain (clamped)
+const FACING_TOLERANCE_PX := 3.0    # px — within this of the target = facing complete
+const FACING_BADGE_RATE := 5.0      # rad/s — badge turn speed (smooth, no snap at swing start)
+const FACING_STALL_TIME := 0.25     # s of blocked swing — then wall contact gives up
+const FACING_GIVE_UP_TIME := 2.0    # s of blocked swing — give up regardless (no soft-lock)
+const FACING_SETTLE_TIMEOUT := 3.0  # s in settling — force-release if the pair can't stop
 
 var board: Node2D
 var state: int = State.TURN_START
@@ -62,6 +79,14 @@ var _aim_current := Vector2.ZERO
 var _preview: Line2D
 var _flight_time := 0.0                 # seconds since launch
 const MIN_FLIGHT_TIME := 0.3            # ball can't die before the puck makes contact
+var _facing := false                    # holder is swinging behind the ball; input locked
+var _facing_swinging := false           # the swing is active (started)
+var _facing_stall := 0.0                # seconds of zero swing progress while facing
+var _facing_last_target := -1.0         # last distance to the swing target (-1 = unset)
+var _facing_badge_rot := 0.0            # badge rotation, moved at FACING_BADGE_RATE
+var _facing_settling := false           # swing done — waiting for cap+ball to stop, then release
+var _facing_settle_time := 0.0          # seconds spent in settling (timeout guard)
+var release_enabled := true             # harness hook: tether cases isolate the held phase
 
 signal turn_changed(player: int)
 signal match_over(winner: int)
@@ -89,6 +114,10 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	passes_left = pass_limit
 	_launcher = null
 	_ball_in_flight = false
+	_facing = false
+	_facing_swinging = false
+	_facing_settling = false
+	_facing_settle_time = 0.0
 	if _selected_cap != null and is_instance_valid(_selected_cap):
 		_selected_cap.get_node("Draw").set("selected", false)
 	_selected_cap = null
@@ -140,7 +169,7 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 	# side it arrived from — no floating gap, no teleport through the cap.
 	var rel: Vector2 = board.ball.position - cap.position
 	var contact := _contact_dist(cap)
-	if rel.length() < ATTACH_MIN_REL or rel.length() > contact + CAPTURE_TOLERANCE:
+	if rel.length() < ATTACH_MIN_REL or rel.length() > contact + ATTACH_SLOP:
 		rel = Vector2(0, -ATTACH_FALLBACK_OFFSET) if active_player == 0 \
 				else Vector2(0, ATTACH_FALLBACK_OFFSET)
 	_hold_offset = rel.normalized() * contact
@@ -156,6 +185,17 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 	# invisible; the impulse form keeps it physical (engine-integrated).
 	if incoming_vel.length() > 40.0:
 		cap.apply_central_impulse(incoming_vel * MOMENTUM_CARRY * cap.mass)
+	# Plato facing: the new holder swings around the ball to sit behind it,
+	# facing the goal it attacks (once it has ridden out any shove — see
+	# _update_facing). Input stays locked until the swing completes or gives
+	# up (wall / stall).
+	_facing = true
+	_facing_swinging = false
+	_facing_stall = 0.0
+	_facing_last_target = -1.0
+	_facing_settling = false
+	_facing_settle_time = 0.0
+	_facing_badge_rot = cap.rotation
 
 func _untether() -> void:
 	## Drop the collision exception between ball and holder.
@@ -174,6 +214,10 @@ func _launch_cap(cap: RigidBody2D, pull: Vector2, speed: float) -> void:
 	print("[Turn] P%d slingshots cap %d (no ball) dir=%s speed=%.0f" % [active_player, board.caps.find(cap), d, speed])
 
 func _launch_puck(dir: Vector2, speed: float) -> void:
+	## HARNESS-ONLY (wall_max / wall_double / pass_chain): direct ball launch
+	## for physics-isolation tests. Live play never calls this — after a
+	## catch the ball RELEASES (Plato ownership) and every pull slings the
+	## cap at the FREE ball via _launch_cap, which physically strikes it.
 	## Slingshot the HOLDER PUCK: impulse to the puck, which physically kicks
 	## the ball (ball is freed from the holder, placed just ahead of it).
 	var ball: RigidBody2D = board.ball
@@ -188,10 +232,19 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	ball.collision_mask = 1
 	ball.linear_velocity = Vector2.ZERO
 	ball.angular_velocity = 0.0
-	ball.position = holder.position + d * (_contact_dist(holder) + LAUNCH_SPAWN_GAP)
+	# body_set_state: a raw position write silently reverts on an AWAKE ball —
+	# and the holder's swing leaves the ball moving at launch, so the pass
+	# used to spawn the ball nowhere and the puck slid past it.
+	PhysicsServer2D.body_set_state(ball.get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM,
+			Transform2D(0.0, board.to_global(
+					holder.position + d * (_contact_dist(holder) + LAUNCH_SPAWN_GAP))))
 	# impulse to the PUCK (impulse = desired velocity × mass). The puck slides
 	# forward, collides with the ball, and the ball flies — like real table soccer.
 	holder.apply_central_impulse(d * speed * holder.mass)
+	_facing = false               # holder shot — the swing is over
+	_facing_swinging = false
+	_facing_settling = false
+	_facing_settle_time = 0.0
 	state = State.FLIGHT
 	_flight_time = 0.0
 	print("[Turn] P%d slingshots cap %d dir=%s speed=%.0f" % [active_player, board.caps.find(holder), d, speed])
@@ -215,6 +268,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_update_preview()
 
 func _handle_press(pos: Vector2, pressed: bool) -> void:
+	if _facing:
+		return                       # controls locked until the holder faces the goal
 	if pressed:
 		var cap := _cap_at(pos)
 		if cap != null:
@@ -247,6 +302,8 @@ func _fire_pull(pull: Vector2) -> void:
 	## Slingshot the SELECTED puck. If it holds the ball → pass or shot.
 	## Otherwise the puck slides; if it strikes the free ball the ball is
 	## knocked into flight (physics) — it never sticks to the striker.
+	if _facing:
+		return                       # controls locked until the holder faces the goal
 	var cap := _selected_cap
 	if cap == null:
 		return
@@ -254,17 +311,11 @@ func _fire_pull(pull: Vector2) -> void:
 	# SRS 02 §4.F counts CONSECUTIVE timeouts; without this reset the counter
 	# only ever grows and timeouts spread across a whole match force a forfeit.
 	consecutive_timeouts[active_player] = 0
-	if cap == holder:
-		var dir := pull.normalized()
-		var speed := _pull_speed(pull)
-		if passes_left > 0:
-			var target := _find_pass_target(dir)
-			if target != null:
-				_launch_puck(target.position - holder.position, speed)
-				return
-		_launch_puck(dir, speed)            # no pass target → shot
-	else:
-		_launch_cap(cap, pull, _pull_speed(pull))
+	# NO holder-launch branch: after a catch the ball is RELEASED once the
+	# cap and ball settle (_release_held_ball), so every pull slings the cap
+	# at a FREE ball — it can only be struck physically, never spawned on
+	# the aim line (the backward-kick teleport is structurally impossible).
+	_launch_cap(cap, pull, _pull_speed(pull))
 
 func _pull_speed(pull: Vector2) -> float:
 	## Linear power curve: full 150px pull = max speed, small pull = gentle slide.
@@ -288,28 +339,13 @@ func _process(delta: float) -> void:
 		_update_preview()
 
 	if state == State.TURN_START or state == State.MOVING:
-		if get_window().has_focus():          # pause timer while window unfocused
+		# the forfeit clock doesn't run while the holder is turning to face
+		# the goal — the player can't act during the turn
+		if not _facing and get_window().has_focus():   # pause timer while window unfocused
 			turn_timer -= delta
 			if turn_timer <= 0.0:
 				_handle_timeout()
 
-
-func _find_pass_target(dir: Vector2) -> RigidBody2D:
-	var best: RigidBody2D = null
-	var best_angle := PASS_CONE
-	for i in board.caps.size():
-		var cap: RigidBody2D = board.caps[i]
-		var team := _team_of(i)
-		if team != active_player or cap == holder:
-			continue
-		var to := cap.position - holder.position
-		if to.length() > MAX_PASS_DIST:
-			continue
-		var angle := absf(dir.angle_to(to.normalized()))
-		if angle < best_angle:
-			best_angle = angle
-			best = cap
-	return best
 
 func _update_preview() -> void:
 	_preview.visible = true
@@ -321,15 +357,9 @@ func _update_preview() -> void:
 	var dir := _aim_start - _aim_current
 	if dir.length() < 20.0:
 		return
-	if cap == holder:
-		if passes_left > 0:
-			var target := _find_pass_target(dir.normalized())
-			if target != null:
-				_preview.default_color = Color(0.4, 1, 0.5, 0.8)   # green = pass
-				_preview.add_point(cap.position)
-				_preview.add_point(target.position)
-				return
-	_preview.default_color = Color(1, 1, 1, 0.6)               # white = shot / slide
+	# The arrow shows the real launch: pull direction, length = power.
+	# No pass indicator, no colour switching — plain white, always.
+	_preview.default_color = Color(1, 1, 1, 0.6)
 	var speed := _pull_speed(dir)
 	_preview.add_point(cap.position)
 	_preview.add_point(cap.position + dir.normalized() * (speed * 0.25))
@@ -363,15 +393,33 @@ func _physics_process(delta: float) -> void:
 			ball.apply_central_force(force)
 			holder.apply_central_force(-force)
 		ball.angular_velocity = 0.0
-		_face_target_goal(holder)
+		_update_facing(holder, delta)
+		# Plato ownership release: once the swing is done (or gave up) and
+		# BOTH the cap and the ball have stopped, the tether drops — the
+		# ball is FREE on the pitch until any cap physically strikes it
+		# again. Input stays locked until release (_facing stays true while
+		# settling). Server velocity via body_get_state — the node property
+		# lags a frame behind an externally applied impulse.
+		if _facing_settling:
+			_facing_settle_time += delta
+			var cap_v: Vector2 = PhysicsServer2D.body_get_state(holder.get_rid(),
+					PhysicsServer2D.BODY_STATE_LINEAR_VELOCITY)
+			var ball_v: Vector2 = PhysicsServer2D.body_get_state(ball.get_rid(),
+					PhysicsServer2D.BODY_STATE_LINEAR_VELOCITY)
+			if release_enabled and (_facing_settle_time > FACING_SETTLE_TIMEOUT \
+					or (cap_v.length() < STOP_THRESHOLD and ball_v.length() < STOP_THRESHOLD)):
+				_release_held_ball()
+				return
 		# Release rule: an opponent cap touching the HOLDER (or the ball — see
-		# _on_ball_body_entered) breaks the tether: possession is lost.
+		# _on_ball_body_entered) breaks the tether: possession is lost. While
+		# the holder is turning to face the goal it SHOVES caps it touches —
+		# that's the holder's own move, so it can't cost possession.
 		for i in board.caps.size():
 			var cap: RigidBody2D = board.caps[i]
 			if cap == holder:
 				continue
 			var team := _team_of(i)
-			if team != active_player \
+			if not _facing and team != active_player \
 					and cap.position.distance_to(holder.position) \
 						< board.cap_radius(cap) + board.cap_radius(holder) + CONTACT_SLOP:
 				_lose_possession()
@@ -387,7 +435,7 @@ func _physics_process(delta: float) -> void:
 		# - If the ball is HELD by another cap, the slide is a free reposition:
 		#   nothing is lost, the turn continues.
 		if _launcher != null and holder == null \
-				and _launcher.position.distance_to(ball.position) < _contact_dist(_launcher) + CAPTURE_TOLERANCE:
+				and _launcher.get_colliding_bodies().has(ball):
 			_ball_in_flight = true
 			_flight_time = 0.0   # grace restarts: cap still has to close the gap
 			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
@@ -408,25 +456,29 @@ func _physics_process(delta: float) -> void:
 	if scorer != -1:
 		_on_goal(scorer)
 		return
-	# stick ONLY on own-teammate contact (with passes left), EXCEPT the striker
+	# stick ONLY on own-teammate CONTACT (with passes left), EXCEPT the striker
 	# (the cap that launched/kicked — ball can't pass to the cap that hit it).
 	# Opponent/wall contact is pure physics — the ball bounces and keeps flying.
+	# Contact-based, like the release rule and the wall give-up: the ball must
+	# actually TOUCH the man to be caught. The old distance check (contact + a
+	# 12px slop constant) stuck the ball out of the air — the "magnet" feel.
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
 		if cap == holder or cap == _launcher:
 			continue
-		if cap.position.distance_to(ball.position) < _contact_dist(cap) + CAPTURE_TOLERANCE:
-			var team := _team_of(i)
-			if team == active_player and passes_left > 0:
-				passes_left -= 1
-				_attach_ball(cap, ball.linear_velocity)
-				state = State.TURN_START
-				turn_timer = TURN_SECONDS
-				print("[Turn] P%d pass complete → cap %d (%d passes left)" % [active_player, i, passes_left])
-				return
-			# opponent (or own cap with no passes left): physics bounce only —
-			# keep checking other caps and still reach the die-check below
+		if not cap.get_colliding_bodies().has(ball):
 			continue
+		var team := _team_of(i)
+		if team == active_player and passes_left > 0:
+			passes_left -= 1
+			_attach_ball(cap, ball.linear_velocity)
+			state = State.TURN_START
+			turn_timer = TURN_SECONDS
+			print("[Turn] P%d pass complete → cap %d (%d passes left)" % [active_player, i, passes_left])
+			return
+		# opponent (or own cap with no passes left): physics bounce only —
+		# keep checking other caps and still reach the die-check below
+		continue
 	# ball died without being captured → stays where it stopped, turn passes
 	# (min flight time: the puck needs a moment to make contact and kick it)
 	if _flight_time > MIN_FLIGHT_TIME and ball.linear_velocity.length() < STOP_THRESHOLD:
@@ -436,8 +488,25 @@ func _lose_possession() -> void:
 	# Ball stays exactly where it stopped — no reset, no teleport, no stick.
 	_untether()
 	holder = null
+	_facing = false
+	_facing_swinging = false
+	_facing_settling = false
+	_facing_settle_time = 0.0
 	print("[Turn] P%d lost ball — it rests at %s" % [active_player, board.ball.position])
 	_pass_turn()
+
+func _release_held_ball() -> void:
+	## Plato ownership: the cap and the ball have both stopped after the
+	## catch — the tether drops and the ball is FREE on the pitch until any
+	## cap physically strikes it again. The turn continues (the player still
+	## owns the move; only the physical bond is gone). Input unlocks.
+	_untether()
+	holder = null
+	_facing = false
+	_facing_swinging = false
+	_facing_settling = false
+	_facing_settle_time = 0.0
+	print("[Turn] P%d ball released — free at %s" % [active_player, board.ball.position])
 
 func _on_ball_body_entered(body: Node) -> void:
 	## Release rule: while the ball is HELD, opponent contact with the ball
@@ -445,7 +514,7 @@ func _on_ball_body_entered(body: Node) -> void:
 	## body_entered fires MID physics-step; mutating physics from inside the
 	## signal (untether, layer changes, turn switch) crashes Godot natively.
 	## So the whole possession loss is deferred to the end of the frame.
-	if holder == null or _ball_in_flight:
+	if holder == null or _ball_in_flight or _facing:
 		return
 	if not (body is RigidBody2D):
 		return                       # wall / other static body — orbit only
@@ -493,15 +562,126 @@ func _end_match(winner: int, forfeit: bool) -> void:
 
 # --- helpers ----------------------------------------------------------------
 
-func _face_target_goal(cap: RigidBody2D) -> void:
-	## A cap holding the ball turns to face the goal it is attacking, as in
-	## Plato. Rotation is cosmetic — the collider is a circle — so it is set
-	## directly rather than torqued, and never fights the physics solver.
+func _update_facing(cap: RigidBody2D, delta: float) -> void:
+	## Plato turn: the holder SWINGS AROUND THE BALL to sit behind it, facing
+	## the goal it attacks (ball between cap and goal, badge toward the goal).
+	## The cap's centre orbits the ball — no self-spin — driven by a velocity
+	## write along the chord to the target point on the orbit circle, so caps
+	## in the arc get shoved and a wall really stops it (nothing phases). The
+	## swing starts only once the cap has ridden out any shove (speed gate);
+	## a mid-swing shove freezes it until the cap settles again.
+	if not _facing:
+		return
+	if _facing_settling:
+		return                       # swing finished — only the release gate acts now
+	var ball: RigidBody2D = board.ball
+	if not _facing_swinging:
+		# ride-out gate: still coasting from the catch/ram — no swing yet.
+		# body_get_state: the node's linear_velocity lags a frame behind an
+		# impulse applied outside the step (attach's momentum carry, a ram),
+		# so the gate would miss it and the swing would steal the slide.
+		var v: Vector2 = PhysicsServer2D.body_get_state(cap.get_rid(),
+				PhysicsServer2D.BODY_STATE_LINEAR_VELOCITY)
+		if v.length() > FACING_STOP_SPEED:
+			_facing_stall = 0.0
+			_facing_last_target = -1.0
+			return
+		_facing_swinging = true
+	# swing target: behind the ball, on the ball→goal line, at contact distance
 	var goal := Vector2(Design.PITCH.x / 2.0, _target_goal_y(active_player))
-	var to_goal := goal - cap.position
-	if to_goal.length_squared() > 1.0:
-		# Sprite art points "up" (-Y), so subtract a quarter turn from the angle.
-		cap.rotation = to_goal.angle() + PI / 2.0
+	var from_goal := ball.position - goal
+	if from_goal.length_squared() < 1.0:
+		_facing_swinging = false
+		_facing_settling = true
+		_facing_settle_time = 0.0
+		return
+	var target := ball.position + from_goal.normalized() * _contact_dist(cap)
+	var to_target := target - cap.position
+	var dist := to_target.length()
+	# badge turns smoothly toward the orbit angle (capped rate — no snap at
+	# the swing start), then tracks it. body_set_state: a direct rotation
+	# write on an AWAKE body is reverted by the physics server (same quirk as
+	# position writes; the old snap worked only on sleeping bodies, which is
+	# why it never showed in live play).
+	_facing_badge_rot = rotate_toward(_facing_badge_rot,
+			(ball.position - cap.position).angle() + PI / 2.0, FACING_BADGE_RATE * delta)
+	PhysicsServer2D.body_set_state(cap.get_rid(), PhysicsServer2D.BODY_STATE_TRANSFORM,
+			Transform2D(_facing_badge_rot, cap.global_position))
+	if dist <= FACING_TOLERANCE_PX:
+		_facing_swinging = false
+		_facing_settling = true        # swing done — release once both stop
+		_facing_settle_time = 0.0
+		cap.linear_velocity = Vector2.ZERO
+		return
+	# swing drive: the cap ORBITS the ball on the contact circle — velocity
+	# purely TANGENTIAL (perpendicular to the cap→ball axis) toward the target
+	# angle, plus a gentle radial pull onto the circle. The old chord pull had
+	# a radial component that dragged the ball through the spring, so the pair
+	# glided across the table like a car; tangential motion keeps the spring
+	# at equilibrium and the ball planted while the cap swings around it.
+	var r_vec := cap.position - ball.position
+	var r_len := r_vec.length()
+	if r_len > 1.0:
+		var d_theta := angle_difference(r_vec.angle(), (ball.position - goal).angle())
+		var omega := clampf(d_theta * FACING_ORBIT_GAIN,
+				-FACING_ORBIT_SPEED / r_len, FACING_ORBIT_SPEED / r_len)
+		var radial := clampf((_contact_dist(cap) - r_len) * 2.0, -40.0, 40.0)
+		# NOTE: -orthogonal() — Godot's orthogonal() returns (y,-x), the
+		# visually-CW perpendicular; negating gives the tangent that moves the
+		# cap along the SHORT arc toward the target angle. Without it the cap
+		# orbits the long way and never converges (dTh stays ~±PI).
+		var v := -r_vec.orthogonal() * omega + r_vec / r_len * radial
+		# wall clamp: never push INTO a wall — the cap slides ALONG the face
+		# instead of burrowing into it. Without this the swing ground against
+		# the wall for seconds (friction-creep read as "progress", so the
+		# stall never accumulated and the give-up never fired).
+		var inner: float = Design.WALL_THICKNESS / 2.0 + board.cap_radius(cap)
+		if cap.position.x < inner and v.x < 0.0:
+			v.x = 0.0
+		elif cap.position.x > Design.PITCH.x - inner and v.x > 0.0:
+			v.x = 0.0
+		if cap.position.y < inner and v.y < 0.0:
+			v.y = 0.0
+		elif cap.position.y > Design.PITCH.y - inner and v.y > 0.0:
+			v.y = 0.0
+		cap.linear_velocity = v
+		# the ball is the pivot: zero its velocity every swing frame so it has
+		# no momentum to carry (the ride-out tail + spring drag) — it stays
+		# planted while the cap orbits. Position pinning would fight the
+		# tether; zeroing keeps the physics intact.
+		ball.linear_velocity = Vector2.ZERO
+	# stall detection: not closing on the target = physically blocked
+	if _facing_last_target < 0.0:
+		_facing_last_target = dist
+	elif dist < _facing_last_target - 0.05:
+		_facing_stall = 0.0
+	else:
+		_facing_stall += delta
+		if _facing_stall >= FACING_GIVE_UP_TIME:
+			# pushed a cap for 2s without progress — give up the swing; the
+			# ball releases once both settle (no soft-lock, controls return
+			# via the release, not by unlocking the holder)
+			_facing_swinging = false
+			_facing_settling = true
+			_facing_settle_time = 0.0
+			cap.linear_velocity = Vector2.ZERO
+		elif _facing_stall >= FACING_STALL_TIME and _touching_structure(cap):
+			# jammed against the wall / goal post — stop trying; same path
+			_facing_swinging = false
+			_facing_settling = true
+			_facing_settle_time = 0.0
+			cap.linear_velocity = Vector2.ZERO
+	_facing_last_target = dist
+
+func _touching_structure(cap: RigidBody2D) -> bool:
+	## Wall / goal-post contact via the real collision system. Caps and the
+	## ball are RigidBody2D; everything immovable (walls, posts, pocket
+	## backs) is a StaticBody2D — so this is exactly "the turn is blocked by
+	## something that won't move".
+	for body in cap.get_colliding_bodies():
+		if body is StaticBody2D:
+			return true
+	return false
 
 func _team_of(index: int) -> int:
 	## 0 = bottom, 1 = top. Sides are CAPS_PER_TEAM long, GK first.

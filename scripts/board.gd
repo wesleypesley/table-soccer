@@ -191,6 +191,13 @@ func _make_cap(pos: Vector2, color: Color, inner: Color, is_gk: bool = false) ->
 	mat.friction = 1.0
 	mat.bounce = 0.05            # caps barely bounce
 	cap.physics_material_override = mat
+	# contact monitoring: the facing swing needs get_colliding_bodies() to
+	# tell a wall (StaticBody2D — give up) from a cap (RigidBody2D — shove it);
+	# the capture rule uses the same contact list — ball must TOUCH the man
+	# to be caught (no distance-magnet). 8 slots: scrums touch ball + walls
+	# + several caps in one step.
+	cap.contact_monitor = true
+	cap.max_contacts_reported = 8
 	# glossy token disc (gradient shader) — below the ring
 	var disc := Node2D.new()
 	disc.name = "Disc"
