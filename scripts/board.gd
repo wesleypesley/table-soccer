@@ -15,6 +15,8 @@ const BALL_MASS := Design.BALL_MASS    # light ball: struck by cap, doesn't shov
 var caps: Array[RigidBody2D] = []
 var ball: RigidBody2D
 var walls: StaticBody2D
+var pocket_walls: StaticBody2D   # goal pocket sides — default material (ball's 0.7 wins)
+var pocket_nets: StaticBody2D    # goal nets (back walls) — contact = goal crossing
 
 # Formation: 6 caps per side (x, y), 1-2-1-2 — the shape the reference
 # screenshot shows. Index 0 of each side is the GOALKEEPER (Design.GK_INDEX),
@@ -65,6 +67,17 @@ func _build_walls() -> void:
 	walls = StaticBody2D.new()
 	walls.name = "Walls"
 	add_child(walls)
+	# The PERIMETER carries the cap bounce: restitution combines per pair
+	# as max(a, b), so cap↔wall = 0.65 (rebound = 65% of arrival speed —
+	# the frame absorbs a third, like a real table) while cap↔cap stays
+	# 0.05 (no domino scatter) and cap↔ball stays 0.7 (the ball's material
+	# dominates). The wall value must stay ≤ 0.7: above that it starts
+	# dictating the BALL's wall bounce too (and 1.0 made the ball rocket
+	# out of the net between frame samples).
+	var wmat := PhysicsMaterial.new()
+	wmat.friction = 1.0
+	wmat.bounce = 0.65
+	walls.physics_material_override = wmat
 
 	var half_gap := GOAL_WIDTH / 2.0
 	var wall_len := (PITCH.x - GOAL_WIDTH) / 2.0      # 280: flanking segment length
@@ -78,12 +91,12 @@ func _build_walls() -> void:
 	var half_t := Design.WALL_THICKNESS / 2.0
 	var d := Design.WALL_COLLISION_DEPTH
 	# Left/right overshoot the pitch ends by `d` so the corners are sealed too.
-	_add_wall_rect(Rect2(half_t - d, -d, d, PITCH.y + d * 2.0))               # left
-	_add_wall_rect(Rect2(PITCH.x - half_t, -d, d, PITCH.y + d * 2.0))         # right
-	_add_wall_rect(Rect2(0, half_t - d, wall_len, d))                         # top L
-	_add_wall_rect(Rect2(PITCH.x - wall_len, half_t - d, wall_len, d))        # top R
-	_add_wall_rect(Rect2(0, PITCH.y - half_t, wall_len, d))                   # bottom L
-	_add_wall_rect(Rect2(PITCH.x - wall_len, PITCH.y - half_t, wall_len, d))  # bottom R
+	_add_wall_rect(Rect2(half_t - d, -d, d, PITCH.y + d * 2.0), walls)               # left
+	_add_wall_rect(Rect2(PITCH.x - half_t, -d, d, PITCH.y + d * 2.0), walls)         # right
+	_add_wall_rect(Rect2(0, half_t - d, wall_len, d), walls)                         # top L
+	_add_wall_rect(Rect2(PITCH.x - wall_len, half_t - d, wall_len, d), walls)        # top R
+	_add_wall_rect(Rect2(0, PITCH.y - half_t, wall_len, d), walls)                   # bottom L
+	_add_wall_rect(Rect2(PITCH.x - wall_len, PITCH.y - half_t, wall_len, d), walls)  # bottom R
 
 	# goal posts: 4 static circles at the goal mouth corners
 	for px in [PITCH.x / 2 - half_gap, PITCH.x / 2 + half_gap]:
@@ -106,26 +119,44 @@ func _build_walls() -> void:
 	# Same inner-face-first rule as the perimeter: the faces a ball inside the
 	# pocket can strike (x=gx0, x=gx1, and the back wall) stay put; the bodies
 	# grow outward by `d`. A goal-speed shot must not tunnel out the back.
-	var back_top := -(pd - tw)           # top pocket back wall, inner face
-	var back_bottom := PITCH.y + pd - tw # bottom pocket back wall, inner face
+	var back_top := -(Design.BALL_RADIUS + 2.0)   # top pocket back wall, inner face
+	var back_bottom := PITCH.y + Design.BALL_RADIUS + 2.0 # bottom pocket back wall, inner face
 	var mouth_w := (gx1 - gx0) + d * 2.0
+	# Pockets get their OWN static body with the DEFAULT material (bounce 0):
+	# only the ball ever reaches them (a cap can't pass the perimeter), and
+	# the ball's own 0.7 must dominate here — a 1.0 pocket-back would bounce
+	# a goal-speed ball out through the mouth between two frame samples and
+	# detect_goal() (position-sampled once per frame) would never see the
+	# crossing. Perimeter 1.0 is for CAPS; the pocket stays the ball's zone.
+	pocket_walls = StaticBody2D.new()
+	pocket_walls.name = "PocketWalls"
+	add_child(pocket_walls)
+	# The NET (back wall) is a SEPARATE body: it is the goal detector —
+	# ball contact with it IS the crossing (the net sits BALL_RADIUS+2
+	# behind the line, so contact implies the centre is fully across).
+	# Splitting avoids false goals from the side-wall corner wedge (a ball
+	# pinned between a post and a pocket side can graze THAT wall with its
+	# centre still above the line).
+	pocket_nets = StaticBody2D.new()
+	pocket_nets.name = "PocketNets"
+	add_child(pocket_nets)
 	# top pocket (y < 0)
-	_add_wall_rect(Rect2(gx0 - d, -pd, d, pd))
-	_add_wall_rect(Rect2(gx1, -pd, d, pd))
-	_add_wall_rect(Rect2(gx0 - d, back_top - d, mouth_w, d))
+	_add_wall_rect(Rect2(gx0 - d, -pd, d, pd), pocket_walls)
+	_add_wall_rect(Rect2(gx1, -pd, d, pd), pocket_walls)
+	_add_wall_rect(Rect2(gx0 - d, back_top - d, mouth_w, d), pocket_nets)
 	# bottom pocket (y > PITCH.y)
-	_add_wall_rect(Rect2(gx0 - d, PITCH.y, d, pd))
-	_add_wall_rect(Rect2(gx1, PITCH.y, d, pd))
-	_add_wall_rect(Rect2(gx0 - d, back_bottom, mouth_w, d))
+	_add_wall_rect(Rect2(gx0 - d, PITCH.y, d, pd), pocket_walls)
+	_add_wall_rect(Rect2(gx1, PITCH.y, d, pd), pocket_walls)
+	_add_wall_rect(Rect2(gx0 - d, back_bottom, mouth_w, d), pocket_nets)
 
-func _add_wall_rect(rect: Rect2) -> void:
-	## Add a static wall rectangle to the shared Walls body (board-local coords).
+func _add_wall_rect(rect: Rect2, body: StaticBody2D) -> void:
+	## Add a static wall rectangle to a shared static body (board-local coords).
 	var shape := RectangleShape2D.new()
 	shape.size = rect.size
 	var col := CollisionShape2D.new()
 	col.shape = shape
 	col.position = rect.position + rect.size / 2.0
-	walls.add_child(col)
+	body.add_child(col)
 
 func _spawn_caps() -> void:
 	for i in FORMATION_BOTTOM.size():
@@ -185,11 +216,21 @@ func _make_cap(pos: Vector2, color: Color, inner: Color, is_gk: bool = false) ->
 	cap.set_meta("radius", radius)
 	cap.set_meta("is_gk", is_gk)
 	cap.mass = Design.GK_MASS if is_gk else CAP_MASS
-	cap.linear_damp = 1.0        # caps glide: total travel ≈ launch speed (px)
+	cap.linear_damp = 1.0        # caps glide ~1s after a shove (travel ≈ launch
+	                             # speed in px) — low damp (0.3) let a shoved cap
+	                             # cross the whole table, causing the domino
+	                             # cascade. The wall bounce still reflects power:
+	                             # a 1400 pull arrives at ~1100 and rebounds ~715.
 	cap.angular_damp = 2.0
 	var mat := PhysicsMaterial.new()
 	mat.friction = 1.0
-	mat.bounce = 0.05            # caps barely bounce
+	mat.bounce = 0.05            # caps barely bounce — restitution is combined
+	                             # per pair as max(a, b), so the WALL's bounce
+	                             # (set in _build_walls) gives cap↔wall its full
+	                             # rebound, while cap↔cap stays near-dead: a
+	                             # slung cap hitting a cluster must NOT scatter
+	                             # it like dominoes, and cap↔ball stays 0.7
+	                             # (the ball's material dominates).
 	cap.physics_material_override = mat
 	# contact monitoring: the facing swing needs get_colliding_bodies() to
 	# tell a wall (StaticBody2D — give up) from a cap (RigidBody2D — shove it);

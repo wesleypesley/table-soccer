@@ -51,6 +51,7 @@ const TETHER_DAMPING := 18.0        # damping c ≈ 2·√(k·m_ball) — near-c
 # shove freezes it until the cap settles again. Player input stays locked
 # until the swing completes or gives up.
 const FACING_STOP_SPEED := 15.0     # px/s — below this the cap is "stopped", the swing may start
+const FACING_RIDEOUT_TIMEOUT := 1.0 # s coasting after a shove — the shove is spent, swing may start
 const FACING_ORBIT_SPEED := 220.0   # px/s — max swing speed (~0.3s to cross 66px)
 const FACING_ORBIT_GAIN := 3.0      # swing speed = gap to target × gain (clamped)
 const FACING_TOLERANCE_PX := 3.0    # px — within this of the target = facing complete
@@ -86,6 +87,7 @@ var _facing_last_target := -1.0         # last distance to the swing target (-1 
 var _facing_badge_rot := 0.0            # badge rotation, moved at FACING_BADGE_RATE
 var _facing_settling := false           # swing done — waiting for cap+ball to stop, then release
 var _facing_settle_time := 0.0          # seconds spent in settling (timeout guard)
+var _facing_rideout_time := 0.0         # seconds the holder has coasted after a shove
 var release_enabled := true             # harness hook: tether cases isolate the held phase
 
 signal turn_changed(player: int)
@@ -118,6 +120,7 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 	_facing_swinging = false
 	_facing_settling = false
 	_facing_settle_time = 0.0
+	_facing_rideout_time = 0.0
 	if _selected_cap != null and is_instance_valid(_selected_cap):
 		_selected_cap.get_node("Draw").set("selected", false)
 	_selected_cap = null
@@ -195,6 +198,7 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 	_facing_last_target = -1.0
 	_facing_settling = false
 	_facing_settle_time = 0.0
+	_facing_rideout_time = 0.0
 	_facing_badge_rot = cap.rotation
 
 func _untether() -> void:
@@ -425,6 +429,15 @@ func _physics_process(delta: float) -> void:
 				_lose_possession()
 				break
 	if state != State.FLIGHT:
+		# Goal check outside flight too: with full-restitution caps, a cap
+		# from a resolved sling keeps bouncing and can shove the FREE ball
+		# across a line during the opponent's turn. Position-based — the
+		# ball is a goal whenever it's fully across, no matter who moved it.
+		if holder == null:
+			var stray_scorer: int = board.detect_goal()
+			if stray_scorer != -1:
+				_on_goal(stray_scorer)
+				return
 		return
 	_flight_time += delta
 
@@ -440,8 +453,12 @@ func _physics_process(delta: float) -> void:
 			_flight_time = 0.0   # grace restarts: cap still has to close the gap
 			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
 			return
-		if _launcher != null and _launcher.linear_velocity.length() < STOP_THRESHOLD \
-				and _flight_time > MIN_FLIGHT_TIME:
+		if _launcher != null and _flight_time > MIN_FLIGHT_TIME and (
+				_launcher.linear_velocity.length() < STOP_THRESHOLD
+				or _touching_structure(_launcher)):
+			# The sling is spent: the puck stopped, or it hit a wall without
+			# touching the ball. With full restitution the puck never "dies" at
+			# the wall — it keeps bouncing as free physics, but the shot is over.
 			if holder == null:
 				_lose_possession()
 			else:
@@ -449,7 +466,7 @@ func _physics_process(delta: float) -> void:
 				_launcher = null
 				state = State.TURN_START
 				print("[Turn] P%d repositions cap (ball held)" % active_player)
-		return
+			return
 
 	# goal?
 	var scorer: int = board.detect_goal()
@@ -509,6 +526,20 @@ func _release_held_ball() -> void:
 	print("[Turn] P%d ball released — free at %s" % [active_player, board.ball.position])
 
 func _on_ball_body_entered(body: Node) -> void:
+	## Net contact = GOAL. The net (pocket back wall) sits BALL_RADIUS+2
+	## behind the goal line, so the ball can only touch it with its centre
+	## already across — this IS the crossing, detected mid-step by the
+	## engine. Position sampling (detect_goal, once per frame) can miss a
+	## goal-speed ball that crosses, hits the net and rebounds out through
+	## the mouth within a single step; body_entered fires at the contact.
+	## Deferred: _on_goal resets the formation mid-step, which crashes
+	## Godot natively (same rule as the possession loss below).
+	if body == board.pocket_nets:
+		if state == State.MATCH_OVER:
+			return
+		var scorer := 0 if board.ball.position.y < board.PITCH.y / 2.0 else 1
+		_on_goal.call_deferred(scorer)
+		return
 	## Release rule: while the ball is HELD, opponent contact with the ball
 	## breaks the tether — possession is lost. Teammate/wall contact orbits.
 	## body_entered fires MID physics-step; mutating physics from inside the
@@ -580,12 +611,17 @@ func _update_facing(cap: RigidBody2D, delta: float) -> void:
 		# body_get_state: the node's linear_velocity lags a frame behind an
 		# impulse applied outside the step (attach's momentum carry, a ram),
 		# so the gate would miss it and the swing would steal the slide.
+		# Timeout: with low cap damping (Plato glide), a shoved cap coasts
+		# for seconds — the shove is spent after FACING_RIDEOUT_TIMEOUT even
+		# if it hasn't stopped; the swing then takes over the motion.
 		var v: Vector2 = PhysicsServer2D.body_get_state(cap.get_rid(),
 				PhysicsServer2D.BODY_STATE_LINEAR_VELOCITY)
-		if v.length() > FACING_STOP_SPEED:
+		if v.length() > FACING_STOP_SPEED and _facing_rideout_time < FACING_RIDEOUT_TIMEOUT:
+			_facing_rideout_time += delta
 			_facing_stall = 0.0
 			_facing_last_target = -1.0
 			return
+		_facing_rideout_time = 0.0
 		_facing_swinging = true
 	# swing target: behind the ball, on the ball→goal line, at contact distance
 	var goal := Vector2(Design.PITCH.x / 2.0, _target_goal_y(active_player))
