@@ -16,21 +16,28 @@ var caps: Array[RigidBody2D] = []
 var ball: RigidBody2D
 var walls: StaticBody2D
 
-# Formation: 5 caps per side (x, y) — default balanced. Attacking/Defending
-# variants land here in the pre-match step (SRS 02 §2).
+# Formation: 6 caps per side (x, y), 1-2-1-2 — the shape the reference
+# screenshot shows. Index 0 of each side is the GOALKEEPER (Design.GK_INDEX),
+# which is a physically larger cap. Attacking/Defending variants land here in
+# the pre-match step (SRS 02 §2).
+#
+# Vertical spacing is measured off the reference; the GK sits clear of the wall
+# (GK_RADIUS 58 + wall inner face 10 => centre must stay above y = 1012).
 const FORMATION_BOTTOM := [
-	Vector2(360, 1010),  # GK
-	Vector2(200, 940),   # DEF L
-	Vector2(520, 940),   # DEF R
-	Vector2(140, 830),   # ATT L
-	Vector2(580, 830),   # ATT R
+	Vector2(360, 1000),  # GK
+	Vector2(258, 857),   # DEF L
+	Vector2(462, 857),   # DEF R
+	Vector2(360, 723),   # MID
+	Vector2(258, 627),   # ATT L
+	Vector2(462, 627),   # ATT R
 ]
 const FORMATION_TOP := [
-	Vector2(360, 70),    # GK
-	Vector2(200, 140),   # DEF L
-	Vector2(520, 140),   # DEF R
-	Vector2(140, 250),   # ATT L
-	Vector2(580, 250),   # ATT R
+	Vector2(360, 80),    # GK
+	Vector2(258, 223),   # DEF L
+	Vector2(462, 223),   # DEF R
+	Vector2(360, 357),   # MID
+	Vector2(258, 453),   # ATT L
+	Vector2(462, 453),   # ATT R
 ]
 
 func _ready() -> void:
@@ -122,15 +129,62 @@ func _add_wall_rect(rect: Rect2) -> void:
 
 func _spawn_caps() -> void:
 	for i in FORMATION_BOTTOM.size():
-		caps.append(_make_cap(FORMATION_BOTTOM[i], Design.CAP_BLUE, Design.CAP_BLUE_INNER))  # blue bottom
+		caps.append(_make_cap(FORMATION_BOTTOM[i], Design.CAP_BLUE, Design.CAP_BLUE_INNER,
+				i == Design.GK_INDEX))                                  # blue bottom
 	for i in FORMATION_TOP.size():
-		caps.append(_make_cap(FORMATION_TOP[i], Design.CAP_RED, Design.CAP_RED_INNER))     # red top
+		caps.append(_make_cap(FORMATION_TOP[i], Design.CAP_RED, Design.CAP_RED_INNER,
+				i == Design.GK_INDEX))                                  # red top
 
-func _make_cap(pos: Vector2, color: Color, inner: Color) -> RigidBody2D:
+func cap_radius(cap: Node) -> float:
+	## Per-cap collider radius. The GK is bigger, so anything that reasons about
+	## contact (capture distance, tether rest length, release rule) must ask the
+	## cap rather than assume Design.CAP_RADIUS.
+	return float(cap.get_meta("radius", Design.CAP_RADIUS))
+
+func formation_for(index: int) -> Vector2:
+	## Home position of cap `index` — used to restore formation at kickoff.
+	var per := Design.CAPS_PER_TEAM
+	return FORMATION_BOTTOM[index] if index < per else FORMATION_TOP[index - per]
+
+func teleport_body(body: RigidBody2D, local_pos: Vector2) -> void:
+	## Hard-move a rigid body to a BOARD-LOCAL position and stop it dead.
+	##
+	## Two traps, both measured:
+	##  1. Writing `body.position` is not enough. For an AWAKE RigidBody2D the
+	##     physics server owns the transform and restores its own on the next
+	##     step, so the write silently reverts one frame later (a direct write
+	##     read back 0.0px error on the same frame and 781.7px four frames on).
+	##     It appears to work on a sleeping body, which is what hides the bug.
+	##  2. PhysicsServer2D transforms are GLOBAL, while formations and the
+	##     centre spot are board-local. Passing a local point straight through
+	##     lands every body off by the board offset — exactly (-198, -426) here.
+	var global_pos: Vector2 = global_transform * local_pos
+	var rid := body.get_rid()
+	PhysicsServer2D.body_set_state(rid, PhysicsServer2D.BODY_STATE_TRANSFORM,
+			Transform2D(0.0, global_pos))
+	PhysicsServer2D.body_set_state(rid, PhysicsServer2D.BODY_STATE_LINEAR_VELOCITY,
+			Vector2.ZERO)
+	PhysicsServer2D.body_set_state(rid, PhysicsServer2D.BODY_STATE_ANGULAR_VELOCITY, 0.0)
+	# Keep the node in sync so the same frame reads back correctly.
+	body.global_position = global_pos
+	body.rotation = 0.0
+
+func reset_formation() -> void:
+	## Return every cap to its formation spot, at rest (after a goal both teams
+	## reform before the kickoff).
+	for i in caps.size():
+		teleport_body(caps[i], formation_for(i))
+
+func _make_cap(pos: Vector2, color: Color, inner: Color, is_gk: bool = false) -> RigidBody2D:
+	var radius: float = Design.GK_RADIUS if is_gk else CAP_RADIUS
 	var cap := RigidBody2D.new()
-	cap.name = "Cap"
+	cap.name = "Goalkeeper" if is_gk else "Cap"
 	cap.position = pos
-	cap.mass = CAP_MASS
+	# The GK's size is REAL: bigger collider, and mass scaled by area so it also
+	# carries the inertia that size implies (Design.GK_MASS).
+	cap.set_meta("radius", radius)
+	cap.set_meta("is_gk", is_gk)
+	cap.mass = Design.GK_MASS if is_gk else CAP_MASS
 	cap.linear_damp = 1.0        # caps glide: total travel ≈ launch speed (px)
 	cap.angular_damp = 2.0
 	var mat := PhysicsMaterial.new()
@@ -154,7 +208,7 @@ func _make_cap(pos: Vector2, color: Color, inner: Color) -> RigidBody2D:
 	cap.add_child(ring)
 	var col := CollisionShape2D.new()
 	var shape := CircleShape2D.new()
-	shape.radius = CAP_RADIUS
+	shape.radius = radius
 	col.shape = shape
 	cap.add_child(col)
 	add_child(cap)
@@ -198,9 +252,9 @@ func detect_goal() -> int:
 	return -1
 
 func reset_ball(pos: Vector2 = PITCH / 2.0) -> void:
-	ball.position = pos
-	ball.linear_velocity = Vector2.ZERO
-	ball.angular_velocity = 0.0
+	# Same server-authoritative teleport as the caps: a goal resets the ball
+	# while it is travelling fast, i.e. very much awake.
+	teleport_body(ball, pos)
 	ball.collision_layer = 1       # a reset ball is always FREE — restore collisions
 	ball.collision_mask = 1        # (a held ball has layer 0 and would ghost through walls)
 

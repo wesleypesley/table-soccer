@@ -409,3 +409,51 @@ column at x=672, directly in the drift path of a receiver shoved by
 rule fired, and `pass_chain` reported a completed pass whose possession had
 already been lost (`passes_after 3`, `holder_is_receiver NO`). Spares now park
 in the top-left corner, clear of every case's action.
+
+---
+
+## 13. Implementing the current brief (6-a-side, bigger GK, kickoff, facing)
+
+Work against `How the game should look and feel/Design & Gameplay Physics rule.md`
+after studying the two reference screenshots. Suite extended to 11 cases, all green.
+
+**Read off the reference, not invented:** every formation thumbnail sums to six
+(1-3-2, 1-2-3, 1-4-1, 1-2-1-2), and the HUD reads **"Goals to win: 3"**, so
+`WIN_GOALS` moved 5 → 3. The in-play shot shows a 1-2-1-2 shape, which is what
+`FORMATION_BOTTOM` / `FORMATION_TOP` now encode.
+
+| brief item | status | evidence |
+| :--- | :--- | :--- |
+| 6 caps per team | done | `formation`: 12 caps, 6/side, no overlaps |
+| GK genuinely bigger | done | `gk`: radius 58 vs 44, collider matches, mass 26.1 vs 15, contact ring 80 vs 66 |
+| Kickoff reforms both teams | done | `kickoff`: formation error 0.0px, ball on the centre spot, conceder kicks off |
+| Holder faces the goal | done | `_face_target_goal` each tether frame |
+| Everything wired (networking) | **not done** | out of scope here |
+| Crowd sound | **not done** | no audio in this environment |
+| Visual identity (stands, crests, nets, flags) | **not done** | needs a display — see below |
+
+### Two bugs this uncovered
+
+**Position writes on an awake RigidBody2D silently revert.** `reset_formation`
+looked correct and did nothing: a direct `cap.position = ...` read back 0.0px
+error on the same frame and **781.7px four frames later**, because the physics
+server owns the transform and restores its own. It appears to work on a
+*sleeping* body, which is exactly what hid it. Both `reset_formation` and
+`reset_ball` now go through `PhysicsServer2D.body_set_state`. `reset_ball` had
+the same latent bug and resets a ball that is travelling fast.
+
+**PhysicsServer2D transforms are global; formations are board-local.** The first
+fix put every cap off by exactly `(-198, -426)` — the board offset. `teleport_body`
+now converts through `global_transform`.
+
+### Not done, and why
+
+The visual half of the brief — stadium crowd stands down both touchlines, club
+crests on the caps, real goal nets, corner flags, the cyan active-team halo —
+is not attempted. The brief asks for it to be built by eye in the 2D editor with
+screenshots, and this environment has no display. Doing it blind is guesswork,
+and the brief's own rule is to work from the video and screenshots visually.
+That work needs the Godot editor + MCP bridge on a machine with a display.
+
+The video itself was not watched: no `ffmpeg` here to extract frames, and the
+`.mp4` cannot be read directly. Everything above comes from the two screenshots.

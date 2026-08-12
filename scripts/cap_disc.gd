@@ -15,7 +15,9 @@ func _process(_delta: float) -> void:
 		queue_redraw()   # only redraw every frame while the glow pulses
 
 func _draw() -> void:
-	var r := Design.CAP_RADIUS
+	# Per-cap radius: the goalkeeper is physically bigger, so its face must be
+	# drawn bigger too. Falls back to the outfield token when unset.
+	var r: float = get_parent().get_meta("radius", Design.CAP_RADIUS)
 	if team_active:
 		# soft breathing team-glow under the token (matches Plato's active-team
 		# highlight; selected cap gets the brighter gold ring on top)

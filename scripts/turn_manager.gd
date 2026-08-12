@@ -8,7 +8,7 @@ enum State { TURN_START, MOVING, FLIGHT, MATCH_OVER }
 
 const TURN_SECONDS := 15.0
 const MAX_TIMEOUTS := 3
-const WIN_GOALS := 5
+const WIN_GOALS := 3                # reference screenshot: "Goals to win: 3"
 const INF_PASSES := 999
 
 const BALL_SPEED_SCALE := 2.0
@@ -93,9 +93,11 @@ func _setup_turn(is_kickoff: bool = false) -> void:
 		_selected_cap.get_node("Draw").set("selected", false)
 	_selected_cap = null
 	if is_kickoff:
-		# kickoff / after-goal: ball to center spot, FREE. The kicking player
-		# picks it up by dragging a cap onto it (pickup mechanic).
+		# kickoff / after-goal: BOTH teams return to their formation and the ball
+		# goes back to the centre spot, FREE. The kicking player picks it up by
+		# dragging a cap onto it (pickup mechanic).
 		_untether()
+		board.reset_formation()
 		board.reset_ball(Vector2(board.PITCH.x / 2.0, board.PITCH.y / 2.0))
 		holder = null
 		board.ball.collision_layer = 1
@@ -116,7 +118,7 @@ func _update_team_glow() -> void:
 	for i in board.caps.size():
 		var disc = board.caps[i].get_node_or_null("Disc")
 		if disc != null:
-			disc.set("team_active", i / 5 == active_player)
+			disc.set("team_active", _team_of(i) == active_player)
 
 # --- ball attach / launch ---------------------------------------------------
 
@@ -137,10 +139,11 @@ func _attach_ball(cap: RigidBody2D, incoming_vel: Vector2 = Vector2.ZERO) -> voi
 	# Graceful stick: ball settles AT the cap's edge (contact distance), on the
 	# side it arrived from — no floating gap, no teleport through the cap.
 	var rel: Vector2 = board.ball.position - cap.position
-	if rel.length() < ATTACH_MIN_REL or rel.length() > CAPTURE_DIST + CAPTURE_TOLERANCE:
+	var contact := _contact_dist(cap)
+	if rel.length() < ATTACH_MIN_REL or rel.length() > contact + CAPTURE_TOLERANCE:
 		rel = Vector2(0, -ATTACH_FALLBACK_OFFSET) if active_player == 0 \
 				else Vector2(0, ATTACH_FALLBACK_OFFSET)
-	_hold_offset = rel.normalized() * CAPTURE_DIST
+	_hold_offset = rel.normalized() * contact
 	board.ball.position = cap.position + _hold_offset
 	# Momentum carry as a REAL impulse (2026-08-11, revised): the ball's
 	# momentum has to go somewhere when it sticks — transferring it to the
@@ -185,7 +188,7 @@ func _launch_puck(dir: Vector2, speed: float) -> void:
 	ball.collision_mask = 1
 	ball.linear_velocity = Vector2.ZERO
 	ball.angular_velocity = 0.0
-	ball.position = holder.position + d * (CAPTURE_DIST + LAUNCH_SPAWN_GAP)
+	ball.position = holder.position + d * (_contact_dist(holder) + LAUNCH_SPAWN_GAP)
 	# impulse to the PUCK (impulse = desired velocity × mass). The puck slides
 	# forward, collides with the ball, and the ball flies — like real table soccer.
 	holder.apply_central_impulse(d * speed * holder.mass)
@@ -296,7 +299,7 @@ func _find_pass_target(dir: Vector2) -> RigidBody2D:
 	var best_angle := PASS_CONE
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
-		var team := 0 if i < 5 else 1
+		var team := _team_of(i)
 		if team != active_player or cap == holder:
 			continue
 		var to := cap.position - holder.position
@@ -354,21 +357,23 @@ func _physics_process(delta: float) -> void:
 		if dist > 0.01:
 			var axis := rel / dist
 			var rel_v: Vector2 = ball.linear_velocity - holder.linear_velocity
-			var spring_f := TETHER_STIFFNESS * (CAPTURE_DIST - dist)
+			var spring_f := TETHER_STIFFNESS * (_contact_dist(holder) - dist)
 			var damp_f := TETHER_DAMPING * rel_v.dot(axis)
 			var force := axis * (spring_f - damp_f)
 			ball.apply_central_force(force)
 			holder.apply_central_force(-force)
 		ball.angular_velocity = 0.0
+		_face_target_goal(holder)
 		# Release rule: an opponent cap touching the HOLDER (or the ball — see
 		# _on_ball_body_entered) breaks the tether: possession is lost.
 		for i in board.caps.size():
 			var cap: RigidBody2D = board.caps[i]
 			if cap == holder:
 				continue
-			var team := 0 if i < 5 else 1
+			var team := _team_of(i)
 			if team != active_player \
-					and cap.position.distance_to(holder.position) < CAP_RADIUS * 2.0 + CONTACT_SLOP:
+					and cap.position.distance_to(holder.position) \
+						< board.cap_radius(cap) + board.cap_radius(holder) + CONTACT_SLOP:
 				_lose_possession()
 				break
 	if state != State.FLIGHT:
@@ -382,7 +387,7 @@ func _physics_process(delta: float) -> void:
 		# - If the ball is HELD by another cap, the slide is a free reposition:
 		#   nothing is lost, the turn continues.
 		if _launcher != null and holder == null \
-				and _launcher.position.distance_to(ball.position) < CAPTURE_DIST + CAPTURE_TOLERANCE:
+				and _launcher.position.distance_to(ball.position) < _contact_dist(_launcher) + CAPTURE_TOLERANCE:
 			_ball_in_flight = true
 			_flight_time = 0.0   # grace restarts: cap still has to close the gap
 			print("[Turn] P%d cap %d strikes the ball" % [active_player, board.caps.find(_launcher)])
@@ -410,8 +415,8 @@ func _physics_process(delta: float) -> void:
 		var cap: RigidBody2D = board.caps[i]
 		if cap == holder or cap == _launcher:
 			continue
-		if cap.position.distance_to(ball.position) < CAPTURE_DIST + CAPTURE_TOLERANCE:
-			var team := 0 if i < 5 else 1
+		if cap.position.distance_to(ball.position) < _contact_dist(cap) + CAPTURE_TOLERANCE:
+			var team := _team_of(i)
 			if team == active_player and passes_left > 0:
 				passes_left -= 1
 				_attach_ball(cap, ball.linear_velocity)
@@ -447,7 +452,7 @@ func _on_ball_body_entered(body: Node) -> void:
 	var idx: int = board.caps.find(body)
 	if idx == -1:
 		return
-	var team := 0 if idx < 5 else 1
+	var team := _team_of(idx)
 	if team != active_player:
 		_lose_possession.call_deferred()
 
@@ -488,13 +493,36 @@ func _end_match(winner: int, forfeit: bool) -> void:
 
 # --- helpers ----------------------------------------------------------------
 
+func _face_target_goal(cap: RigidBody2D) -> void:
+	## A cap holding the ball turns to face the goal it is attacking, as in
+	## Plato. Rotation is cosmetic — the collider is a circle — so it is set
+	## directly rather than torqued, and never fights the physics solver.
+	var goal := Vector2(Design.PITCH.x / 2.0, _target_goal_y(active_player))
+	var to_goal := goal - cap.position
+	if to_goal.length_squared() > 1.0:
+		# Sprite art points "up" (-Y), so subtract a quarter turn from the angle.
+		cap.rotation = to_goal.angle() + PI / 2.0
+
+func _team_of(index: int) -> int:
+	## 0 = bottom, 1 = top. Sides are CAPS_PER_TEAM long, GK first.
+	return 0 if index < Design.CAPS_PER_TEAM else 1
+
+func _contact_dist(cap: Node) -> float:
+	## Distance between cap centre and ball centre at contact. Per-cap, because
+	## the goalkeeper's collider is larger than an outfield cap's.
+	return board.cap_radius(cap) + Design.BALL_RADIUS
+
+func _target_goal_y(player: int) -> float:
+	## The goal `player` attacks: the bottom team (0) shoots at the top goal.
+	return 0.0 if player == 0 else Design.PITCH.y
+
 func _cap_at(pos: Vector2) -> RigidBody2D:
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
-		var team := 0 if i < 5 else 1
+		var team := _team_of(i)
 		if team != active_player:
 			continue
-		if cap.position.distance_to(pos) <= CAP_RADIUS + TAP_TOLERANCE:
+		if cap.position.distance_to(pos) <= board.cap_radius(cap) + TAP_TOLERANCE:
 			return cap
 	return null
 
@@ -503,7 +531,7 @@ func _nearest_own_cap(pos: Vector2) -> RigidBody2D:
 	var best_d := INF
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
-		var team := 0 if i < 5 else 1
+		var team := _team_of(i)
 		if team != active_player:
 			continue
 		var d := cap.position.distance_to(pos)

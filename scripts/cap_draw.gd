@@ -21,7 +21,7 @@ func _set_pulse(v: float) -> void:
 func _draw() -> void:
 	if not selected:
 		return
-	var r := Design.CAP_RADIUS
+	var r: float = get_parent().get_meta("radius", Design.CAP_RADIUS)
 	var glow := 0.12 + _pulse * 0.14          # breathing alpha
 	var ext := 12.0 + _pulse * 6.0            # breathing radius
 	# soft outer glow + bright core (layered arcs)

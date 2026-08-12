@@ -23,6 +23,9 @@ extends Node
 const SETTLE_FRAMES := 4
 const MIN_PARK_GAP := 100.0            # parked caps shove neighbours if closer
 const LONG_TIMER := 99999.0
+## Contact distance for an OUTFIELD cap. The GK's is larger; cases that use a
+## GK must ask board.cap_radius() rather than assume this.
+const OUTFIELD_CONTACT := Design.CAP_RADIUS + Design.BALL_RADIUS
 const SPARE_CLEARANCE := 60.0          # margin a parked spare must keep beyond the release radius
 
 # Wall geometry, derived from tokens — never hardcoded.
@@ -55,6 +58,10 @@ func _ready() -> void:
 		"wall_double":  await _case_wall_double()
 		"tether":       await _case_tether()
 		"pass_chain":   await _case_pass_chain()
+		"formation":    await _case_formation()
+		"gk":           await _case_gk()
+		"kickoff":      await _case_kickoff()
+		"facing":       await _case_facing()
 		"goal":         await _case_goal()
 		"forfeit":      await _case_forfeit()
 		_:
@@ -93,10 +100,19 @@ func _report(case_name: String) -> void:
 
 func _park(cap: RigidBody2D, pos: Vector2) -> void:
 	## Park a test cap for setup, zeroing velocity so it never carries stale
-	## momentum into the case.
-	cap.position = pos
-	cap.linear_velocity = Vector2.ZERO
-	cap.angular_velocity = 0.0
+	## momentum into the case. `pos` is board-local.
+	##
+	## Goes through PhysicsServer2D, not `cap.position = ...`: for an AWAKE
+	## RigidBody2D the server owns the transform and silently discards a direct
+	## write. That is invisible on a freshly spawned (sleeping) board but breaks
+	## any case that parks a second time — the cap stays where it was and the
+	## case measures nonsense. body_set_state takes a GLOBAL transform, hence
+	## board.to_global().
+	var rid := cap.get_rid()
+	PhysicsServer2D.body_set_state(rid, PhysicsServer2D.BODY_STATE_TRANSFORM,
+			Transform2D(0.0, board.to_global(pos)))
+	PhysicsServer2D.body_set_state(rid, PhysicsServer2D.BODY_STATE_LINEAR_VELOCITY, Vector2.ZERO)
+	PhysicsServer2D.body_set_state(rid, PhysicsServer2D.BODY_STATE_ANGULAR_VELOCITY, 0.0)
 
 func _park_others_away(keep: Array) -> void:
 	## Move every cap not in `keep` into a tight cluster in the TOP-LEFT corner,
@@ -118,6 +134,9 @@ func _park_others_away(keep: Array) -> void:
 		var row := 60.0 + float(slot / 3) * (MIN_PARK_GAP + 10.0)
 		_park(cap, Vector2(col, row))
 		slot += 1
+	# Node transforms sync from the server on the next step; read-back before
+	# that is stale, so step once before checking clearances.
+	await _step(1)
 	_assert_spares_clear(keep)
 
 func _assert_spares_clear(keep: Array) -> void:
@@ -137,43 +156,6 @@ func _assert_spares_clear(keep: Array) -> void:
 		push_error("BAD SETUP: a parked spare is %.1fpx from a kept cap (need > %.1f)"
 				% [worst, release_dist + SPARE_CLEARANCE])
 	_row("setup_min_spare_gap", "%.1f px (release at %.1f)" % [worst, release_dist])
-
-func _blocked_report(holder: RigidBody2D) -> String:
-	## Read-only mirror of the tether's candidate test in turn_manager, so a
-	## failing orbit can be attributed to a specific blocker or to the bounds
-	## clamp instead of guessed at. Kept in the test, not the game code.
-	var ball: RigidBody2D = board.ball
-	var rel: Vector2 = ball.position - holder.position
-	var base_angle := rel.angle()
-	var blocked_by_cap := 0
-	var blocked_by_bounds := 0
-	var clear := 0
-	var worst := ""
-	for sweep in range(34):
-		var a := base_angle
-		if sweep > 0:
-			var dir_sign := 1.0 if sweep % 2 == 1 else -1.0
-			a += dir_sign * (float(sweep) + 1.0) * 0.1
-		var cand: Vector2 = holder.position + Vector2.from_angle(a) * Design.CAPTURE_DIST
-		var hit := -1
-		for i in board.caps.size():
-			var c: RigidBody2D = board.caps[i]
-			if c == holder:
-				continue
-			if cand.distance_to(c.position) < Design.CAPTURE_DIST:
-				hit = i
-				break
-		if hit != -1:
-			blocked_by_cap += 1
-			if worst == "":
-				worst = "cap%d" % hit
-		elif cand.x < 42.0 or cand.x > 678.0 or cand.y < 42.0 or cand.y > 1038.0:
-			blocked_by_bounds += 1
-			if worst == "":
-				worst = "bounds"
-		else:
-			clear += 1
-	return "clear=%d blk_cap=%d blk_bounds=%d first=%s" % [clear, blocked_by_cap, blocked_by_bounds, worst]
 
 func _capture_with(cap: RigidBody2D) -> void:
 	## Establish possession through the REAL capture path. _attach_ball is the
@@ -204,8 +186,8 @@ func _case_probe() -> void:
 	_row("cap_moved", "%.1f px" % cap_start.distance_to(cap.position))
 	_row("ball_moved", "%.1f px" % ball_start.distance_to(ball.position))
 	_row("ball_peak_speed", "%.1f px/s" % ball_peak)
-	_row("min_cap_ball_gap", "%.1f px (contact %.1f)" % [min_gap, Design.CAPTURE_DIST])
-	_row("cap_ball_overlap", "%.1f px" % maxf(0.0, Design.CAPTURE_DIST - min_gap))
+	_row("min_cap_ball_gap", "%.1f px (contact %.1f)" % [min_gap, OUTFIELD_CONTACT])
+	_row("cap_ball_overlap", "%.1f px" % maxf(0.0, OUTFIELD_CONTACT - min_gap))
 	_row("PHYSICS_STEPS", "YES" if cap_start.distance_to(cap.position) > 1.0 else "NO")
 
 func _case_wall_max() -> void:
@@ -215,7 +197,7 @@ func _case_wall_max() -> void:
 	## BALL_SPEED_MAX and physically kicks the ball across the pitch.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
-	_park_others_away([holder])
+	await _park_others_away([holder])
 	_park(holder, Vector2(Design.PITCH.x - 160.0, Design.PITCH.y / 2.0))
 	await _step(2)
 	_capture_with(holder)
@@ -275,9 +257,9 @@ func _case_wall_double() -> void:
 	## Holder is parked close to the wall so the rebound meets the puck.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
-	_park_others_away([holder])
+	await _park_others_away([holder])
 	# Close to the wall: puck centre one cap-radius + margin off the face.
-	_park(holder, Vector2(WALL_INNER_FACE_X + Design.CAP_RADIUS + Design.CAPTURE_DIST + 20.0,
+	_park(holder, Vector2(WALL_INNER_FACE_X + Design.CAP_RADIUS + OUTFIELD_CONTACT + 20.0,
 			Design.PITCH.y / 2.0))
 	await _step(2)
 	_capture_with(holder)
@@ -340,7 +322,7 @@ func _case_tether() -> void:
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
 	var mate: RigidBody2D = board.caps[4]           # OWN team, so no release rule
-	_park_others_away([holder, mate])
+	await _park_others_away([holder, mate])
 	# Holder is parked clear of the ball spawn: parking a cap ON the ball makes
 	# the solver eject it and every measurement after that is noise.
 	_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 160.0))
@@ -371,13 +353,13 @@ func _case_tether() -> void:
 		d1_max = maxf(d1_max, d1)
 		d2_min = minf(d2_min, ball.position.distance_to(mate.position))
 
-	_row("orbit_radius_target", "%.1f px" % Design.CAPTURE_DIST)
+	_row("orbit_radius_target", "%.1f px" % OUTFIELD_CONTACT)
 	_row("d1_after_settle", "%.2f px" % d1_settled)
 	_row("d1_min", "%.2f px" % d1_min)
 	_row("d1_max", "%.2f px" % d1_max)
-	_row("d1_max_deviation", "%.2f px" % maxf(absf(d1_max - Design.CAPTURE_DIST), absf(d1_min - Design.CAPTURE_DIST)))
+	_row("d1_max_deviation", "%.2f px" % maxf(absf(d1_max - OUTFIELD_CONTACT), absf(d1_min - OUTFIELD_CONTACT)))
 	_row("d2_min_vs_mate", "%.2f px" % d2_min)
-	_row("phase_through", "YES" if d2_min < Design.CAPTURE_DIST - 1.0 else "NO")
+	_row("phase_through", "YES" if d2_min < OUTFIELD_CONTACT - 1.0 else "NO")
 	_row("held_every_frame", "YES" if held_all else "NO (lost at frame %d)" % lost_at)
 
 func _case_tether_moving() -> void:
@@ -385,7 +367,7 @@ func _case_tether_moving() -> void:
 	## HOLDER is gliding instead of parked. Nothing else differs from _case_tether.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
-	_park_others_away([holder])
+	await _park_others_away([holder])
 	_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 160.0))
 	await _step(2)
 	_capture_with(holder)
@@ -403,13 +385,13 @@ func _case_tether_moving() -> void:
 		var r := ball.position.distance_to(holder.position)
 		r_max = maxf(r_max, r)
 		if i % 3 == 0:
-			trace.append("f%d r=%.2f v_hold=%.0f %s" % [i, r, holder.linear_velocity.length(), _blocked_report(holder)])
+			trace.append("f%d r=%.2f v_hold=%.0f" % [i, r, holder.linear_velocity.length()])
 
-	_row("orbit_target", "%.2f px" % Design.CAPTURE_DIST)
+	_row("orbit_target", "%.2f px" % OUTFIELD_CONTACT)
 	_row("radius_holder_parked", "%.2f px" % r_parked)
 	_row("radius_max_while_moving", "%.2f px" % r_max)
 	_row("radius_final", "%.2f px" % ball.position.distance_to(holder.position))
-	_row("DEGRADES_WHEN_MOVING", "YES" if r_max > Design.CAPTURE_DIST + 1.0 else "NO")
+	_row("DEGRADES_WHEN_MOVING", "YES" if r_max > OUTFIELD_CONTACT + 1.0 else "NO")
 	for t in trace:
 		_row("  trace", t)
 
@@ -419,7 +401,7 @@ func _case_pass_chain() -> void:
 	var ball: RigidBody2D = board.ball
 	var passer: RigidBody2D = board.caps[3]
 	var receiver: RigidBody2D = board.caps[4]
-	_park_others_away([passer, receiver])
+	await _park_others_away([passer, receiver])
 	_park(passer, Vector2(200.0, Design.PITCH.y / 2.0))
 	_park(receiver, Vector2(200.0 + 320.0, Design.PITCH.y / 2.0))
 	await _step(2)
@@ -454,11 +436,10 @@ func _case_pass_chain() -> void:
 			# means nothing physically stops this.
 			if crushed_at == -1 and r_now < Design.CAP_RADIUS:
 				crushed_at = i
-			trace.append("f%d r=%.2f v_hold=%.0f %s d_passer=%.0f" % [
+			trace.append("f%d r=%.2f v_hold=%.0f d_passer=%.0f" % [
 				i,
 				ball.position.distance_to(receiver.position),
 				receiver.linear_velocity.length(),
-				_blocked_report(receiver),
 				passer.position.distance_to(receiver.position)])
 		radius_settled = ball.position.distance_to(receiver.position)
 
@@ -467,7 +448,7 @@ func _case_pass_chain() -> void:
 	_row("pass_completed", "YES" if caught else "NO")
 	_row("caught_at_frame", caught_at)
 	_row("holder_is_receiver", "YES" if tm.holder == receiver else "NO")
-	_row("orbit_target", "%.2f px" % Design.CAPTURE_DIST)
+	_row("orbit_target", "%.2f px" % OUTFIELD_CONTACT)
 	_row("radius_at_catch", "%.2f px" % radius_at_catch)
 	_row("radius_after_settle", "%.2f px" % radius_settled)
 	_row("radius_min_after_catch", "%.2f px" % radius_min_after)
@@ -482,7 +463,7 @@ func _case_goal() -> void:
 	## a shot from mid-pitch must cross the opponent goal line.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
-	_park_others_away([holder])
+	await _park_others_away([holder])
 	# Mid-pitch, shooting at the TOP goal (P0 scores when ball.y < 0).
 	_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 160.0))
 	await _step(2)
@@ -521,6 +502,157 @@ func _case_goal() -> void:
 	_row("scored_at_frame", scored_at)
 	_row("score", tm.score)
 
+func _case_formation() -> void:
+	## Spawn integrity for the 6-a-side formation: no cap may overlap another
+	## cap, a wall, or the kickoff ball. Cheap to check and catches a bad
+	## formation table immediately, which is otherwise a subtle physics mess.
+	var per: int = Design.CAPS_PER_TEAM
+	var worst_pair := INF
+	var worst_pair_name := ""
+	var worst_wall := INF
+	var ball_gap := INF
+
+	for i in board.caps.size():
+		var a: RigidBody2D = board.caps[i]
+		var ra: float = board.cap_radius(a)
+		# cap vs cap
+		for j in range(i + 1, board.caps.size()):
+			var b: RigidBody2D = board.caps[j]
+			var clearance: float = a.position.distance_to(b.position) - ra - board.cap_radius(b)
+			if clearance < worst_pair:
+				worst_pair = clearance
+				worst_pair_name = "%d-%d" % [i, j]
+		# cap vs wall (inner faces)
+		var half_t := Design.WALL_THICKNESS / 2.0
+		worst_wall = minf(worst_wall, a.position.x - half_t - ra)
+		worst_wall = minf(worst_wall, (Design.PITCH.x - half_t) - a.position.x - ra)
+		worst_wall = minf(worst_wall, a.position.y - half_t - ra)
+		worst_wall = minf(worst_wall, (Design.PITCH.y - half_t) - a.position.y - ra)
+		ball_gap = minf(ball_gap, a.position.distance_to(board.ball.position) - ra - Design.BALL_RADIUS)
+
+	_row("caps_total", board.caps.size())
+	_row("caps_per_team", per)
+	_row("min_cap_cap_clearance", "%.1f px (pair %s)" % [worst_pair, worst_pair_name])
+	_row("min_cap_wall_clearance", "%.1f px" % worst_wall)
+	_row("min_cap_ball_clearance", "%.1f px" % ball_gap)
+	_row("NO_CAP_OVERLAP", "YES" if worst_pair > 0.0 else "NO")
+	_row("ALL_INSIDE_WALLS", "YES" if worst_wall > 0.0 else "NO")
+	_row("BALL_SPAWN_CLEAR", "YES" if ball_gap > 0.0 else "NO")
+
+func _case_gk() -> void:
+	## The goalkeeper's size must be REAL physics, not a visual trick: bigger
+	## collider, bigger contact ring, and enough mass that an outfield cap
+	## charging it does not shove it around like a peer.
+	var gk: RigidBody2D = board.caps[Design.GK_INDEX]
+	var outfield: RigidBody2D = board.caps[Design.GK_INDEX + 1]
+	var gk_r: float = board.cap_radius(gk)
+	var out_r: float = board.cap_radius(outfield)
+
+	_row("gk_index", Design.GK_INDEX)
+	_row("gk_radius", "%.1f px" % gk_r)
+	_row("outfield_radius", "%.1f px" % out_r)
+	_row("GK_IS_BIGGER", "YES" if gk_r > out_r else "NO")
+	_row("gk_mass", "%.1f" % gk.mass)
+	_row("outfield_mass", "%.1f" % outfield.mass)
+	_row("GK_IS_HEAVIER", "YES" if gk.mass > outfield.mass else "NO")
+
+	# The collider really is bigger, not just the metadata: ask the shape.
+	var shape: CircleShape2D = gk.get_node("CollisionShape2D").shape as CircleShape2D \
+			if gk.get_node_or_null("CollisionShape2D") != null else null
+	if shape == null:
+		for c in gk.get_children():
+			if c is CollisionShape2D:
+				shape = (c as CollisionShape2D).shape as CircleShape2D
+				break
+	_row("gk_collider_radius", "%.1f px" % (shape.radius if shape != null else -1.0))
+	_row("COLLIDER_MATCHES", "YES" if shape != null and is_equal_approx(shape.radius, gk_r) else "NO")
+
+	# Contact ring: the ball sticks to the GK further out than to an outfield cap.
+	_row("gk_contact_dist", "%.1f px" % tm._contact_dist(gk))
+	_row("outfield_contact_dist", "%.1f px" % tm._contact_dist(outfield))
+
+	# Ram the GK with an outfield cap and record how far it gets shoved --
+	# reported, not asserted: the right value is a feel call, not a fact.
+	await _park_others_away([gk, outfield])
+	_park(gk, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0))
+	_park(outfield, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0 + 300.0))
+	await _step(2)
+	var gk_start := gk.position
+	outfield.apply_central_impulse(Vector2.UP * 1200.0 * outfield.mass)
+	for i in 90:
+		await _step(1)
+	_row("gk_shoved_by", "%.1f px" % gk_start.distance_to(gk.position))
+
+func _case_kickoff() -> void:
+	## After a goal: both teams return to formation, the ball resets to the
+	## centre spot, and the CONCEDING side kicks off.
+	var ball: RigidBody2D = board.ball
+	# Scatter the pitch so a reset is unmistakable.
+	for i in board.caps.size():
+		_park(board.caps[i], Vector2(80.0 + float(i % 4) * 60.0, 300.0 + float(i / 4) * 60.0))
+	await _step(2)
+	var scattered_err := 0.0
+	for i in board.caps.size():
+		scattered_err = maxf(scattered_err, board.caps[i].position.distance_to(board.formation_for(i)))
+	var scorer := 0                      # bottom team scores
+	tm.score = [0, 0]
+	tm._on_goal(scorer)
+	await _step(4)
+
+	var worst := 0.0
+	var worst_i := -1
+	for i in board.caps.size():
+		var e: float = board.caps[i].position.distance_to(board.formation_for(i))
+		if e > worst:
+			worst = e
+			worst_i = i
+	_row("worst_cap", worst_i)
+	var centre := Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0)
+
+	_row("scatter_before_reset", "%.1f px" % scattered_err)
+	_row("worst_formation_error", "%.1f px" % worst)
+	_row("FORMATION_RESTORED", "YES" if worst < 1.0 else "NO")
+	_row("ball_pos", ball.position)
+	_row("BALL_AT_CENTRE_SPOT", "YES" if ball.position.distance_to(centre) < 1.0 else "NO")
+	_row("scorer", "P%d" % scorer)
+	_row("kicks_off", "P%d" % tm.active_player)
+	_row("CONCEDER_KICKS_OFF", "YES" if tm.active_player == 1 - scorer else "NO")
+	_row("score", tm.score)
+	_row("win_goals", tm.WIN_GOALS)
+
+func _case_facing() -> void:
+	## A cap holding the ball turns to face the goal it is attacking (Plato).
+	## Checked for BOTH sides, since they attack opposite ends.
+	var results: Array[String] = []
+	var ok := true
+	for player in [0, 1]:
+		# caps 0..5 are the bottom side, 6..11 the top side; index 1 is outfield.
+		var holder: RigidBody2D = board.caps[1 if player == 0 else Design.CAPS_PER_TEAM + 1]
+		tm.active_player = player
+		# Park the HOLDER first: _park_others_away asserts on clearance, and on
+		# the second pass this cap is still sitting in the spare cluster from
+		# the first, which reads as an opponent on top of it.
+		_park(holder, Vector2(Design.PITCH.x / 2.0, Design.PITCH.y / 2.0))
+		await _step(1)
+		await _park_others_away([holder])
+		await _step(2)
+		_capture_with(holder)
+		await _step(6)
+
+		# The goal this player attacks, and the direction the cap should point.
+		var goal := Vector2(Design.PITCH.x / 2.0, 0.0 if player == 0 else Design.PITCH.y)
+		var want := (goal - holder.position).angle() + PI / 2.0
+		var err := absf(angle_difference(holder.rotation, want))
+		if err > 0.01:
+			ok = false
+		results.append("P%d rot=%.3f want=%.3f err=%.4f" % [player, holder.rotation, want, err])
+		tm._lose_possession()
+		await _step(2)
+
+	for r in results:
+		_row("  ", r)
+	_row("FACES_TARGET_GOAL", "YES" if ok else "NO")
+
 func _case_forfeit() -> void:
 	## P7: 3-strike forfeit final score. The turn timer is driven by _process,
 	## which gates on get_window().has_focus() — unreliable headless — so the
@@ -539,7 +671,7 @@ func _case_forfeit() -> void:
 	# Now the same player actually takes their shot — that must clear the streak.
 	tm.active_player = loser
 	tm.state = tm.State.TURN_START
-	tm._set_selected(board.caps[0])
+	tm._set_selected(board.caps[1])
 	tm._fire_pull(Vector2(0.0, -60.0))
 	var after_normal_turn: Array = (tm.consecutive_timeouts as Array).duplicate()
 
@@ -560,8 +692,8 @@ func _case_forfeit() -> void:
 	_row("timeouts_to_forfeit", timeouts)
 	_row("consecutive_timeouts", tm.consecutive_timeouts)
 	_row("final_score", tm.score)
-	_row("expected_by_brief", "5-0 (loser zeroed)")
-	_row("SHOWS_5_0", "YES" if tm.score[loser] == 0 else "NO (shows 5-%d)" % tm.score[loser])
+	_row("expected_result", "%d-0 (loser zeroed)" % tm.WIN_GOALS)
+	_row("LOSER_ZEROED", "YES" if tm.score[loser] == 0 else "NO (shows %d-%d)" % [tm.WIN_GOALS, tm.score[loser]])
 	_row("state_is_MATCH_OVER", "YES" if tm.state == tm.State.MATCH_OVER else "NO")
 	_row("--- consecutive check ---", "")
 	_row("after_one_timeout", after_one)

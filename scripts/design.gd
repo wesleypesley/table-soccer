@@ -11,6 +11,16 @@ const PITCH := Vector2(720.0, 1080.0)
 const GOAL_WIDTH := 160.0                    # centered on top/bottom
 const CAP_RADIUS := 44.0
 const BALL_RADIUS := 22.0
+
+# --- team composition (matches the Plato reference screenshots) ---------------
+## 6 caps per side: 5 outfield + 1 goalkeeper. The GK is genuinely bigger —
+## a larger collider and proportionally larger mass, not a visual trick — so it
+## really does cover more of the mouth and shrugs off contact.
+const CAPS_PER_TEAM := 6
+const GK_INDEX := 0                          # first cap of each team is the GK
+const GK_RADIUS := 58.0                      # ~1.3x an outfield cap
+## Mass scales with area so the GK has the inertia its size implies.
+const GK_MASS := 15.0 * (GK_RADIUS * GK_RADIUS) / (CAP_RADIUS * CAP_RADIUS)
 const WALL_THICKNESS := 20.0                 # VISUAL rail thickness (pitch_draw)
 ## PHYSICS-ONLY wall depth. Collision walls keep their inner face exactly where
 ## WALL_THICKNESS puts it — every bounce is geometrically identical — but extend

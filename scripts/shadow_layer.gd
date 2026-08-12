@@ -12,7 +12,7 @@ func _draw() -> void:
 		return
 	for cap in board.caps:
 		if cap != null and is_instance_valid(cap):
-			_draw_shadow(cap.position, Design.CAP_RADIUS * 0.95)
+			_draw_shadow(cap.position, float(cap.get_meta("radius", Design.CAP_RADIUS)) * 0.95)
 	if board.ball != null and is_instance_valid(board.ball):
 		_draw_shadow(board.ball.position, Design.BALL_RADIUS * 0.9)
 
