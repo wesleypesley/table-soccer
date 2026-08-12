@@ -12,11 +12,12 @@ func _draw() -> void:
 	var c := p / 2.0
 	var line := Design.LINE_WHITE
 
-	# --- 1. wood table frame (full canvas, procedural grain) ---
+	# --- 1. ground: grass, then a crowd stand down each touchline ---
 	# board is centered: canvas spans (-off) .. (CANVAS-off) in board coords
 	var off := (Design.CANVAS - p) / 2.0
-	draw_rect(Rect2(-off.x, -off.y, Design.CANVAS.x, Design.CANVAS.y), Design.WOOD_BASE)
-	_draw_wood_grain(off)
+	draw_rect(Rect2(-off.x, -off.y, Design.CANVAS.x, Design.CANVAS.y), Design.GRASS_BG)
+	_draw_grass_ground(off, p)
+	_draw_stands(p)
 
 	# --- 2. felt: deep green + darker apron ring + grass texture ---
 	# baked tileable grass-noise texture (seeded, zero assets) — same trick as
@@ -25,16 +26,21 @@ func _draw() -> void:
 	var apron := 34.0
 	draw_rect(Rect2(-apron, -apron, p.x + apron * 2.0, p.y + apron * 2.0), Design.FELT_APRON)
 	draw_rect(Rect2(0, 0, p.x, p.y), Design.PITCH_FELT)
+	# Mow bands + vertical vignette, both measured off the reference: the turf
+	# runs FELT_EDGE at the two ends and PITCH_FELT across the middle, with the
+	# bands alternating by MOW_CONTRAST on top of that gradient.
 	var tile := _get_grass_tile()
-	var stripe_h := p.y / 8.0
-	for i in 8:
-		var rect := Rect2(0, stripe_h * float(i), p.x, stripe_h)
-		# alternate light/dark stripes (~8% like real mowed turf)
-		var tint := Color(1, 1, 1) if i % 2 == 0 else Color(0.88, 0.88, 0.88)
-		draw_texture_rect(tile, rect, true, tint)
-	# soft top-light falloff over the grass
-	draw_rect(Rect2(0, 0, p.x, p.y * 0.30), Color(1, 1, 1, 0.03))
-	draw_rect(Rect2(0, p.y * 0.78, p.x, p.y * 0.22), Color(0, 0, 0, 0.045))
+	var bands := 16
+	var stripe_h := p.y / float(bands)
+	for i in bands:
+		var rect := Rect2(0, stripe_h * float(i), p.x, stripe_h + 1.0)
+		# 0 at the ends, 1 at the halfway line
+		var mid: float = 1.0 - absf((float(i) + 0.5) / float(bands) - 0.5) * 2.0
+		var base: Color = Design.FELT_EDGE.lerp(Design.PITCH_FELT, smoothstep(0.0, 1.0, mid))
+		if i % 2 == 1:
+			base = base.darkened(Design.MOW_CONTRAST)
+		draw_rect(rect, base)
+		draw_texture_rect(tile, rect, true, Color(1, 1, 1, 0.5))
 
 	# --- 3. markings: center ---
 	draw_line(Vector2(0, c.y), Vector2(p.x, c.y), line, 3.0)
@@ -52,7 +58,7 @@ func _draw() -> void:
 	draw_arc(Vector2(r, p.y - r), r, PI * 0.5, PI, 16, line, 3.0)
 	draw_arc(Vector2(p.x - r, p.y - r), r, 0, PI * 0.5, 16, line, 3.0)
 
-	# --- 6. walls: rounded beveled rails ---
+	# --- 6. walls: silver beveled rails ---
 	draw_rect(Rect2(0, 0, p.x, t), Design.WALL_COLOR)
 	draw_rect(Rect2(0, p.y - t, p.x, t), Design.WALL_COLOR)
 	draw_rect(Rect2(0, 0, t, p.y), Design.WALL_COLOR)
@@ -69,7 +75,11 @@ func _draw() -> void:
 	# white boundary line at the felt edge
 	draw_rect(Rect2(0, 0, p.x, p.y), line, false, 3.0)
 
-	# --- 7. goals: deep pocket + net + lit posts ---
+	# corner flags sit ON TOP of the rails — drawn before them, the rail's
+	# corner circles painted straight over the bottom pair.
+	_draw_corner_flags(p)
+
+	# --- 7. goals: net structures outside the goal line ---
 	var half := Design.GOAL_WIDTH / 2.0
 	_draw_goal(c.x, half, p, true)
 	_draw_goal(c.x, half, p, false)
@@ -118,6 +128,54 @@ static func _get_grass_tile() -> ImageTexture:
 	_grass_tile = ImageTexture.create_from_image(img)
 	return _grass_tile
 
+func _draw_grass_ground(off: Vector2, p: Vector2) -> void:
+	## Subtle mottling on the surrounding grass so it does not read as flat
+	## paint. Deterministic seed — the ground must not shimmer between frames.
+	_rng.seed = 20260812
+	var w := Design.CANVAS.x
+	var h := Design.CANVAS.y
+	for i in 900:
+		var x := _rng.randf_range(-off.x, w - off.x)
+		var y := _rng.randf_range(-off.y, h - off.y)
+		# skip the pitch itself — it is drawn over this anyway
+		if x > -60.0 and x < p.x + 60.0 and y > -60.0 and y < p.y + 60.0:
+			continue
+		var shade := Design.GRASS_BG.lightened(_rng.randf_range(0.0, 0.10)) \
+				if _rng.randf() < 0.5 else Design.GRASS_BG.darkened(_rng.randf_range(0.0, 0.12))
+		draw_rect(Rect2(x, y, _rng.randf_range(6.0, 22.0), _rng.randf_range(2.0, 5.0)), shade)
+
+func _draw_stands(p: Vector2) -> void:
+	## Crowd stands down both touchlines — the reference's most distinctive
+	## framing element (the build previously drew a wood table instead).
+	## Dark base + bright confetti speckle, which is what the sampled histogram
+	## of the reference shows: mostly dark, spectators a colourful minority.
+	var w := Design.STAND_WIDTH
+	var gap := Design.STAND_GAP
+	var over := 60.0                                   # run past both goal ends
+	var top := -over
+	var height := p.y + over * 2.0
+	_rng.seed = 991137
+	for side in 2:
+		var x: float = -gap - w if side == 0 else p.x + gap
+		var rect := Rect2(x, top, w, height)
+		draw_rect(rect, Design.STAND_BASE)
+		# tiered rows: alternating shade so the stand reads as banked seating
+		var row_h := 26.0
+		var rows := int(height / row_h)
+		for r in rows:
+			if r % 2 == 1:
+				draw_rect(Rect2(x, top + float(r) * row_h, w, row_h * 0.5), Design.STAND_SHADE)
+		# spectators
+		var dots := int(height / 5.0)
+		for i in dots:
+			var cx := x + _rng.randf_range(3.0, w - 3.0)
+			var cy := top + _rng.randf_range(2.0, height - 2.0)
+			var col: Color = Design.STAND_CONFETTI[_rng.randi() % Design.STAND_CONFETTI.size()]
+			draw_rect(Rect2(cx, cy, _rng.randf_range(3.0, 6.0), _rng.randf_range(3.0, 6.0)),
+					Color(col, _rng.randf_range(0.55, 1.0)))
+		# metal frame around the stand
+		draw_rect(rect, Design.STAND_FRAME, false, 4.0)
+
 func _draw_goal_area_markings(cx: float, p: Vector2, line: Color, top: bool) -> void:
 	var y0 := 0.0 if top else p.y
 	var dir := 1.0 if top else -1.0
@@ -142,40 +200,53 @@ func _draw_goal_area_markings(cx: float, p: Vector2, line: Color, top: bool) -> 
 		draw_arc(Vector2(cx, spot_y), arc_r, -PI / 2.0 - half_ang, -PI / 2.0 + half_ang, 32, line, 3.0)
 
 func _draw_goal(cx: float, half: float, p: Vector2, top: bool) -> void:
-	# pocket walls are physical (board.gd); draw the pocket shell so it reads
-	# as a net: dark pocket, crosshatch, back wall + side walls, posts.
-	var pd := 36.0
-	var tw := 20.0
-	var gx0 := cx - half
-	var gx1 := cx + half
-	# pocket shell (behind the goal line)
-	var shell := Rect2(gx0 - tw, (-pd if top else p.y), (gx1 - gx0) + tw * 2.0, pd)
-	if not top:
-		shell.position.y = p.y
-	# dark pocket interior
-	draw_rect(shell, Color(0, 0, 0, 0.30))
-	# net crosshatch inside the pocket
-	var step := 8.0
-	var x := shell.position.x
+	## White net structure standing OUTSIDE the goal line, as in the reference —
+	## not a flat dark pocket. The physical pocket walls live in board.gd; this
+	## is purely how it reads.
+	var depth := Design.GOAL_DEPTH
+	var post := Design.GOAL_POST_RADIUS
+	var gx0 := cx - half - post
+	var gx1 := cx + half + post
+	var line_y := 0.0 if top else p.y
+	var outer_y := line_y - depth if top else line_y + depth
+	var shell := Rect2(gx0, minf(line_y, outer_y), gx1 - gx0, depth)
+
+	# shaded interior so the mesh reads against the grass behind it
+	draw_rect(shell, Design.GOAL_INTERIOR)
+
+	# net mesh — denser than the old crosshatch, and light rather than dark
+	var step := 11.0
+	var x := shell.position.x + step
 	while x < shell.end.x:
-		draw_line(Vector2(x, shell.position.y), Vector2(x, shell.end.y), Design.GOAL_NET, 1.0)
+		draw_line(Vector2(x, shell.position.y), Vector2(x, shell.end.y), Design.GOAL_NET, 1.5)
 		x += step
-	var y := shell.position.y
+	var y := shell.position.y + step
 	while y < shell.end.y:
-		draw_line(Vector2(shell.position.x, y), Vector2(shell.end.x, y), Design.GOAL_NET, 1.0)
+		draw_line(Vector2(shell.position.x, y), Vector2(shell.end.x, y), Design.GOAL_NET, 1.5)
 		y += step
-	# pocket frame (wall color)
-	draw_rect(shell, Design.WALL_COLOR, false, tw)
-	# net frame edge at the goal line
-	var frame := Color(1, 1, 1, 0.4)
-	if top:
-		draw_line(Vector2(gx0, 0), Vector2(gx1, 0), frame, 3.0)
-	else:
-		draw_line(Vector2(gx0, p.y), Vector2(gx1, p.y), frame, 3.0)
-	# posts: lit charcoal cylinders (highlight + shadow + rim)
-	for px in [gx0, gx1]:
-		var py := 0.0 if top else p.y
-		draw_circle(Vector2(px, py), Design.GOAL_POST_RADIUS, Design.WALL_COLOR)
-		draw_circle(Vector2(px - 3, py - 3), Design.GOAL_POST_RADIUS * 0.55, Design.WALL_COLOR.lightened(0.25))
-		draw_circle(Vector2(px + 3, py + 3), Design.GOAL_POST_RADIUS * 0.45, Color(0, 0, 0, 0.25))
-		draw_arc(Vector2(px, py), Design.GOAL_POST_RADIUS, 0, TAU, 24, Color(1, 1, 1, 0.28), 2.0)
+
+	# frame: side stanchions + back bar, in white
+	var fw := 6.0
+	draw_rect(shell, Design.GOAL_FRAME, false, fw)
+	draw_line(Vector2(gx0, line_y), Vector2(gx1, line_y), Design.GOAL_FRAME, fw + 2.0)
+
+	# posts at the mouth corners
+	for px in [cx - half, cx + half]:
+		draw_circle(Vector2(px, line_y), post, Design.GOAL_FRAME)
+		draw_circle(Vector2(px - 2, line_y - 2), post * 0.5, Color(1, 1, 1, 0.9))
+		draw_arc(Vector2(px, line_y), post, 0, TAU, 24, Design.CAP_RIM_DARK, 1.5)
+
+func _draw_corner_flags(p: Vector2) -> void:
+	## Small pennants at the four corners — red at the top end, cyan at the
+	## bottom, matching the reference.
+	var h := Design.FLAG_HEIGHT
+	var inset := Design.WALL_THICKNESS + 6.0
+	for corner in [Vector2(inset, inset), Vector2(p.x - inset, inset),
+			Vector2(inset, p.y - inset), Vector2(p.x - inset, p.y - inset)]:
+		var is_top: bool = corner.y < p.y / 2.0
+		var col: Color = Design.FLAG_TOP if is_top else Design.FLAG_BOTTOM
+		var tip: Vector2 = corner + Vector2(0, -h)
+		draw_line(corner, tip, Design.FLAG_POLE, 3.0)
+		var dir := 1.0 if corner.x < p.x / 2.0 else -1.0
+		draw_colored_polygon(PackedVector2Array([
+			tip, tip + Vector2(dir * 20.0, 7.0), tip + Vector2(0, 14.0)]), col)

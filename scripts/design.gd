@@ -46,14 +46,48 @@ const CAP_MASS := 15.0                       # caps heavy vs ball — ball barel
 const BALL_MASS := 0.5                       # light ball: struck by cap, doesn't shove caps
 const SLEEP_THRESHOLD := 5.0                 # px/s — all-bodies-settled threshold
 
-# --- colors: table (measured from real Plato screenshot) ----------------------
-const TABLE_BG := Color("#202124")           # dark charcoal matte canvas
-const PITCH_FELT := Color("#436327")         # deep muted green (real Plato felt)
+# --- colors: table -----------------------------------------------------------
+# Pixel-sampled from the reference gameplay screenshot, not eyeballed.
+# The old PITCH_FELT (#436327) turned out to be almost exactly the reference's
+# BACKGROUND grass (#45652A) — the pitch itself is far brighter than that, which
+# is why the build read so dull next to the reference.
+const TABLE_BG := Color("#202124")           # matte canvas behind everything
+const GRASS_BG := Color("#45652A")           # ground the table sits on (sampled)
+const PITCH_FELT := Color("#6FA337")         # bright mid-pitch turf (sampled)
+const FELT_EDGE := Color("#3B5726")          # ends of the pitch — vertical vignette
 const FELT_APRON := Color("#3a5521")         # darker felt apron ring around pitch
+const MOW_CONTRAST := 0.10                   # light/dark alternation of the mow bands
 const LINE_WHITE := Color(1, 1, 1, 0.95)     # crisp pitch markings, 2-3px
-const WALL_COLOR := Color("#202124")         # dark charcoal containment walls
+const RAIL_SILVER := Color("#B3ACB6")        # beveled perimeter rail (sampled)
+const WALL_COLOR := Color("#B3ACB6")         # rails read silver, not charcoal
 const WALL_GLOW := Color(1, 1, 1, 0.12)      # inner edge highlight
-const GOAL_NET := Color(1, 1, 1, 0.35)       # net crosshatch
+const GOAL_NET := Color(1, 1, 1, 0.72)       # net mesh
+const GOAL_FRAME := Color("#F2F4F7")         # white goal frame (posts + crossbar)
+const GOAL_INTERIOR := Color("#20301A")       # dark ground behind the white mesh
+const GOAL_DEPTH := 62.0                     # how far the net stands off the line
+## Corner flags — red at the top end, cyan at the bottom, as in the reference.
+const FLAG_TOP := Color("#E2413B")
+const FLAG_BOTTOM := Color("#33C6E8")
+const FLAG_POLE := Color("#E8E8EA")
+const FLAG_HEIGHT := 34.0
+## Active-team halo: a bright cyan ring around every cap of the side to move.
+const TEAM_HALO := Color("#7FE7FF")
+## Metallic rim around each cap token.
+const CAP_RIM := Color("#C9CCD4")
+const CAP_RIM_DARK := Color("#6E7481")
+
+# --- crowd stands (both touchlines) ------------------------------------------
+## Dark base with bright confetti speckle: the sampled histogram is dominated by
+## dark browns/greys, with the colourful spectators a minority of pixels.
+const STAND_BASE := Color("#3A2A20")
+const STAND_SHADE := Color("#241a14")
+const STAND_FRAME := Color("#8d8d95")
+const STAND_WIDTH := 58.0                    # scaled from the reference ratio
+const STAND_GAP := 42.0                      # clear space between rail and stand
+const STAND_CONFETTI: Array[Color] = [
+	Color("#e04a4a"), Color("#f2c14b"), Color("#4aa3e0"), Color("#e8e8ea"),
+	Color("#57c078"), Color("#d96fb0"), Color("#f08a3c"), Color("#8b6bd9"),
+]
 
 # --- wood table frame (real Plato: mottled wood around the felt) --------------
 const WOOD_BASE := Color("#7a5230")          # warm tan-brown

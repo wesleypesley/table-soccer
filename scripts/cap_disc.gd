@@ -19,18 +19,43 @@ func _draw() -> void:
 	# drawn bigger too. Falls back to the outfield token when unset.
 	var r: float = get_parent().get_meta("radius", Design.CAP_RADIUS)
 	if team_active:
-		# soft breathing team-glow under the token (matches Plato's active-team
-		# highlight; selected cap gets the brighter gold ring on top)
+		# Bright cyan halo ring around every cap of the side to move — the
+		# reference's most legible "your turn" cue. Layered rings give a soft
+		# falloff without a shader.
 		var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() / 1000.0 * 3.0)
-		var glow: Color = base_color
-		glow.a = 0.16 + 0.14 * pulse
-		draw_circle(Vector2.ZERO, r * (1.25 + 0.08 * pulse), glow)
+		for i in 4:
+			var t := float(i) / 3.0
+			var ring: Color = Design.TEAM_HALO
+			ring.a = (0.42 - 0.09 * float(i)) * (0.75 + 0.25 * pulse)
+			draw_arc(Vector2.ZERO, r + 5.0 + t * 11.0, 0, TAU, 48, ring,
+					7.0 - t * 3.0)
+	# metallic rim: dark seat under a bright ring, so the token reads as a
+	# machined disc rather than a flat circle
+	draw_circle(Vector2.ZERO, r, Design.CAP_RIM_DARK)
+	draw_arc(Vector2.ZERO, r - 3.0, 0, TAU, 48, Design.CAP_RIM, 6.0)
 	var tex: ImageTexture = _get_token_texture(base_color, inner_color)
-	draw_texture_rect(tex, Rect2(-r, -r, r * 2.0, r * 2.0), false)
-	# crisp white rim ring (Plato signature)
-	draw_arc(Vector2.ZERO, r - 2.0, 0, TAU, 48, Color(1, 1, 1, 0.85), 4.0)
+	var face := r - 7.0
+	draw_texture_rect(tex, Rect2(-face, -face, face * 2.0, face * 2.0), false)
+	# club badge: a light disc with the team colour behind a simple emblem
+	_draw_badge(face)
 	# specular highlight (light from top-left)
-	draw_circle(Vector2(-r * 0.34, -r * 0.34), r * 0.15, Color(1, 1, 1, 0.85))
+	draw_circle(Vector2(-r * 0.34, -r * 0.34), r * 0.13, Color(1, 1, 1, 0.8))
+
+func _draw_badge(face: float) -> void:
+	## Stand-in for the club crest the reference caps carry. Not a real badge —
+	## a legible emblem at cap size, built from primitives only.
+	var br := face * 0.52
+	draw_circle(Vector2.ZERO, br, Color(1, 1, 1, 0.92))
+	draw_circle(Vector2.ZERO, br * 0.86, inner_color)
+	# vertical bars, the way a striped kit reads at this size
+	var bars := 4
+	for i in bars:
+		if i % 2 == 1:
+			continue
+		var w := br * 0.34
+		var x := -br * 0.7 + float(i) * (br * 1.4 / float(bars))
+		draw_rect(Rect2(x, -br * 0.62, w, br * 1.24), base_color.darkened(0.25))
+	draw_arc(Vector2.ZERO, br * 0.86, 0, TAU, 32, Color(1, 1, 1, 0.75), 2.0)
 
 ## Bakes a radially-shaded disc into an Image once per (base,inner) pair and
 ## caches it. Light from the upper-left; darker rim; lighter concentric inner
