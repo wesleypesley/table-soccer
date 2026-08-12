@@ -1,5 +1,23 @@
 # Physics Brief — Work Summary
 
+> **⚠️ SUPERSEDED IN PART — read this first.**
+> This document describes work done against `PHYSICS_BRIEF_FOR_CLAUDE.md`, which
+> was **removed from the repo** in `3d96773`; the current brief is
+> `How the game should look and feel/Design & Gameplay Physics rule.md`.
+> Since PR #1 merged, `turn_manager.gd` has been substantially rewritten
+> (2026-08-11): the sweep-based tether is now a **spring**
+> (`TETHER_STIFFNESS` / `TETHER_DAMPING`), `MAX_BALL_SPEED` and
+> `HELD_BALL_SPEED` were removed in favour of CCD, the striker follow-through
+> brake was removed, and `MOMENTUM_CARRY` became a real impulse.
+>
+> **Still accurate:** §4 (P7 forfeit, both fixes in place), §5 (P2 refactor),
+> §7 (goal pocket — re-verified on current master), and §2's wall-depth fix
+> (`WALL_COLLISION_DEPTH` survives; the ball is still contained).
+> **Stale:** §6's tether numbers describe the old implementation. See §12 for
+> measurements taken against current master.
+
+---
+
 Response to `PHYSICS_BRIEF_FOR_CLAUDE.md`, structured per its §9. Every claim
 below is backed by a measured number from `tests/run_all.sh`; nothing is marked
 fixed on the strength of "it looks right".
@@ -341,3 +359,53 @@ glides (§6), so the ball sits ~77px out after every real pass. Fixing it means
 touching the §2 core mechanic, which has a documented history of failed
 approaches. Accepting it means updating §3 of the brief, since the "66px orbit"
 invariant is only true for a stationary holder.
+
+---
+
+## 12. Re-measured against current master (f2874c3)
+
+Run after PR #1 merged and `turn_manager.gd` was rewritten. Suite is green;
+these are the values that moved.
+
+| case | before (PR #1) | current master | note |
+| :--- | ---: | ---: | :--- |
+| probe cap/ball overlap | 8.0 | **14.3** | no speed clamp |
+| wall_max overall penetration | 26.99 | **38.36** | no speed clamp; first impact unchanged at 26.99 |
+| wall_double escape | contained | **contained** | deep wall still holds, peak 3211.8 |
+| tether (parked) | 66.00 | **66.00** | spring holds exactly |
+| tether_moving drift | 76.34 | **71.01** | spring improved it; not eliminated |
+| goal | scores | **scores** | pocket bug (§7) unchanged |
+| forfeit | 5-0, counter resets | **5-0, counter resets** | both fixes intact |
+
+### New regression — the striker crushes the ball into the receiver
+
+`pass_chain` now ends with the ball **inside its own holder**: settled radius
+**19.75px**, minimum **17.37px**, against a cap radius of 44 and a contact
+distance of 66.
+
+The trace shows the spring behaving correctly and then being overpowered:
+
+```
+f0..f9   r 77.21 -> 67.44   smooth spring convergence toward 66
+f9       d_passer=128       striker closing
+f10      r 51.67            collapse in ONE frame; v_hold 162 -> 335
+f13      r 34.13            BALL_INSIDE_HOLDER trips
+f19      r 19.75            caps ~88 apart = touching, ball trapped between
+```
+
+The striker coasts into the receiver and squeezes the ball into it. The
+ball/holder collision exception means nothing physically stops this — the
+removed follow-through brake was what previously kept the striker off the
+receiver (its own comment said "so it can't cannonball into the receiver").
+
+Guarded by `BALL_INSIDE_HOLDER` in `pass_chain` so it cannot regress silently.
+**Not fixed here:** the brake removal was a deliberate, user-confirmed feel
+change (`8d076db`), and the tether was rewritten the same day — fixing this
+means touching a subsystem under active revision, so it needs a decision.
+
+Also fixed in this pass: `_park_others_away` used to park spare caps in a
+column at x=672, directly in the drift path of a receiver shoved by
+`MOMENTUM_CARRY`. The receiver coasted into a parked **opponent**, the release
+rule fired, and `pass_chain` reported a completed pass whose possession had
+already been lost (`passes_after 3`, `holder_is_receiver NO`). Spares now park
+in the top-left corner, clear of every case's action.

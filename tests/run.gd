@@ -1,9 +1,14 @@
 extends Node
 ## Headless physics test suite for TableSoccer.
 ##
-## Protocol (PHYSICS_BRIEF_FOR_CLAUDE.md §6): ONE case per FRESH process, so FSM
-## state can never leak between cases. The `--headless` engine steps physics
-## normally; only rendering is stubbed.
+## Protocol: ONE case per FRESH process, so FSM state can never leak between
+## cases. The `--headless` engine steps physics normally; only rendering is
+## stubbed.
+##
+## (The protocol originally came from PHYSICS_BRIEF_FOR_CLAUDE.md, removed from
+## the repo in 3d96773; the current brief is "How the game should look and
+## feel/Design & Gameplay Physics rule.md". Rule references below point at
+## Table_Soccer_Documentation_Suite/02_gameplay_turn_system.md, which is live.)
 ##
 ##   godot --headless tests/run.tscn -- <case>
 ##   tests/run_all.sh                          # every case, one process each
@@ -11,13 +16,14 @@ extends Node
 ## Test-setup rules honoured here:
 ##  - No ball teleports. Possession is always established through the game's own
 ##    capture path (`turn_manager._attach_ball`), never by writing ball.position.
-##  - Caps may be parked (brief §6.3 explicitly sanctions parking test caps);
-##    parked caps are kept >= MIN_PARK_GAP apart so they don't shove neighbours.
+##  - Caps may be parked for setup; parked caps are kept >= MIN_PARK_GAP apart
+##    so they don't shove neighbours, and clear of any coasting cap's path.
 ##  - Turn timer is pinned high so the FSM can't forfeit mid-case.
 
 const SETTLE_FRAMES := 4
-const MIN_PARK_GAP := 100.0            # brief §6.3
+const MIN_PARK_GAP := 100.0            # parked caps shove neighbours if closer
 const LONG_TIMER := 99999.0
+const SPARE_CLEARANCE := 60.0          # margin a parked spare must keep beyond the release radius
 
 # Wall geometry, derived from tokens — never hardcoded.
 # Left wall segment is centred on x=0 with thickness WALL_THICKNESS, so its
@@ -86,23 +92,51 @@ func _report(case_name: String) -> void:
 # --- shared helpers ----------------------------------------------------------
 
 func _park(cap: RigidBody2D, pos: Vector2) -> void:
-	## Park a test cap. Brief §6.3 sanctions parking caps for setup; we zero the
-	## velocity so a parked cap never carries stale momentum into the case.
+	## Park a test cap for setup, zeroing velocity so it never carries stale
+	## momentum into the case.
 	cap.position = pos
 	cap.linear_velocity = Vector2.ZERO
 	cap.angular_velocity = 0.0
 
 func _park_others_away(keep: Array) -> void:
-	## Move every cap not in `keep` out to a far corner column so it can't
-	## interfere. Spacing >= MIN_PARK_GAP (brief §6.3).
+	## Move every cap not in `keep` into a tight cluster in the TOP-LEFT corner,
+	## clear of the mid-pitch and bottom-half action every case uses.
+	##
+	## This used to be a column at x=PITCH.x-48, which sat directly in the drift
+	## path of a receiver shoved by MOMENTUM_CARRY: the receiver coasted into a
+	## parked OPPONENT, the release rule fired, and pass_chain reported a
+	## completed pass whose possession had already been lost. Park spares where
+	## nothing coasts into them. Spacing >= MIN_PARK_GAP.
+	## 3 columns, so all 9 spares fit inside the corner instead of the last one
+	## spilling down the left edge into a holder parked at mid-pitch.
 	var slot := 0
 	for i in board.caps.size():
 		var cap: RigidBody2D = board.caps[i]
 		if keep.has(cap):
 			continue
-		var col := Design.PITCH.x - Design.CAP_RADIUS - 4.0
-		_park(cap, Vector2(col, 80.0 + float(slot) * MIN_PARK_GAP))
+		var col := 60.0 + float(slot % 3) * (MIN_PARK_GAP + 10.0)
+		var row := 60.0 + float(slot / 3) * (MIN_PARK_GAP + 10.0)
+		_park(cap, Vector2(col, row))
 		slot += 1
+	_assert_spares_clear(keep)
+
+func _assert_spares_clear(keep: Array) -> void:
+	## A spare parked too near a kept cap silently ruins a case: an opponent
+	## within CAP_RADIUS*2 + CONTACT_SLOP of the holder trips the release rule
+	## and possession is gone before the case even starts. Fail loudly instead.
+	var release_dist := Design.CAP_RADIUS * 2.0 + 6.0
+	var worst := INF
+	for i in board.caps.size():
+		var spare: RigidBody2D = board.caps[i]
+		if keep.has(spare):
+			continue
+		for k in keep:
+			var kept: RigidBody2D = k
+			worst = minf(worst, spare.position.distance_to(kept.position))
+	if worst < release_dist + SPARE_CLEARANCE:
+		push_error("BAD SETUP: a parked spare is %.1fpx from a kept cap (need > %.1f)"
+				% [worst, release_dist + SPARE_CLEARANCE])
+	_row("setup_min_spare_gap", "%.1f px (release at %.1f)" % [worst, release_dist])
 
 func _blocked_report(holder: RigidBody2D) -> String:
 	## Read-only mirror of the tether's candidate test in turn_manager, so a
@@ -300,8 +334,8 @@ func _case_wall_double() -> void:
 		_row("  trace", t)
 
 func _case_tether() -> void:
-	## Regression guard for the core mechanic (brief §2/§3): the held ball
-	## orbits at exactly CAPTURE_DIST and never phases through a blocking cap.
+	## Regression guard for the core mechanic: the held ball orbits at exactly
+	## CAPTURE_DIST and never phases through a blocking cap.
 	## An opponent cap is rammed at the holder to stress the sweep.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
@@ -321,7 +355,7 @@ func _case_tether() -> void:
 	var d2_min := INF
 	var held_all := true
 	var lost_at := -1
-	# Teammate ram, tangential (brief §6.4: dead-radial hits slam the ball into
+	# Teammate ram, tangential (dead-radial hits slam the ball into
 	# the holder). A teammate can't trigger the release rule, so this isolates
 	# the tether's blocking/sweep behaviour from possession loss.
 	mate.apply_central_impulse(Vector2(0.35, 1.0).normalized() * 1100.0 * mate.mass)
@@ -406,11 +440,20 @@ func _case_pass_chain() -> void:
 
 	var radius_at_catch := 0.0
 	var radius_settled := 0.0
+	var radius_min_after := INF
+	var crushed_at := -1
 	var trace: Array[String] = []
 	if caught:
 		radius_at_catch = ball.position.distance_to(receiver.position)
 		for i in 20:                    # watch the tether pull it onto the circle
 			await _step(1)
+			var r_now := ball.position.distance_to(receiver.position)
+			radius_min_after = minf(radius_min_after, r_now)
+			# Inside the holder's own collider = the ball has been pushed into
+			# the cap it is attached to. The ball/holder collision exception
+			# means nothing physically stops this.
+			if crushed_at == -1 and r_now < Design.CAP_RADIUS:
+				crushed_at = i
 			trace.append("f%d r=%.2f v_hold=%.0f %s d_passer=%.0f" % [
 				i,
 				ball.position.distance_to(receiver.position),
@@ -427,13 +470,15 @@ func _case_pass_chain() -> void:
 	_row("orbit_target", "%.2f px" % Design.CAPTURE_DIST)
 	_row("radius_at_catch", "%.2f px" % radius_at_catch)
 	_row("radius_after_settle", "%.2f px" % radius_settled)
+	_row("radius_min_after_catch", "%.2f px" % radius_min_after)
+	_row("BALL_INSIDE_HOLDER", "NO" if crushed_at == -1 \
+			else "YES (frame %d, cap radius %.0f)" % [crushed_at, Design.CAP_RADIUS])
 	_row("fsm_state", tm.state)
 	for t in trace:
 		_row("  trace", t)
 
 func _case_goal() -> void:
-	## Is a goal actually reachable with a real shot? Required by the P3
-	## checklist ("goals still reachable") and a standing regression guard:
+	## Is a goal actually reachable with a real shot? Standing regression guard:
 	## a shot from mid-pitch must cross the opponent goal line.
 	var ball: RigidBody2D = board.ball
 	var holder: RigidBody2D = board.caps[3]
