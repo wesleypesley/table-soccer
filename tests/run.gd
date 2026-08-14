@@ -63,6 +63,7 @@ func _ready() -> void:
 		"kickoff":      await _case_kickoff()
 		"facing":       await _case_facing()
 		"goal":         await _case_goal()
+		"audio":        await _case_audio()
 		"forfeit":      await _case_forfeit()
 		_:
 			push_error("unknown case: %s" % case_name)
@@ -706,6 +707,42 @@ func _case_facing() -> void:
 	for r in results:
 		_row("  ", r)
 	_row("FACES_TARGET_GOAL", "YES" if ok else "NO")
+
+func _case_audio() -> void:
+	## Crowd audio (brief item 6): the beds load, the ambient one is marked
+	## looping, the two channels toggle independently, and a goal reaches the
+	## director. Playback itself cannot be asserted headlessly — there is no
+	## audio device — so this checks wiring and state, not sound.
+	var audio: Node = main.get_node_or_null("Audio")
+	_row("director_present", "YES" if audio != null else "NO")
+	if audio == null:
+		return
+	var amb: AudioStreamPlayer = audio.get_node_or_null("Ambient")
+	var cheer: AudioStreamPlayer = audio.get_node_or_null("Cheer")
+	_row("ambient_stream", "loaded" if amb != null and amb.stream != null else "MISSING")
+	_row("cheer_stream", "loaded" if cheer != null and cheer.stream != null else "MISSING")
+	var wav := amb.stream as AudioStreamWAV if amb != null else null
+	_row("ambient_loop_mode", "LOOP_FORWARD" if wav != null \
+			and wav.loop_mode == AudioStreamWAV.LOOP_FORWARD else "NOT LOOPING")
+	_row("connected_to_goal", "YES" if tm.goal_scored.is_connected(audio._on_goal_scored) else "NO")
+
+	# the two channels are independent, as the reference menu implies
+	var amb_before: bool = audio.ambient_enabled
+	var snd_before: bool = audio.sound_enabled
+	audio.toggle_ambient()
+	_row("ambient_toggled", "%s -> %s" % [amb_before, audio.ambient_enabled])
+	_row("sound_UNAFFECTED", "YES" if audio.sound_enabled == snd_before else "NO")
+	audio.toggle_sound()
+	_row("sound_toggled", "%s -> %s" % [snd_before, audio.sound_enabled])
+	audio.toggle_ambient()
+	audio.toggle_sound()
+	_row("restored", "ambient=%s sound=%s" % [audio.ambient_enabled, audio.sound_enabled])
+
+	# a real goal must reach the director without erroring
+	tm.score = [0, 0]
+	tm._on_goal(0)
+	await _step(2)
+	_row("goal_emitted_ok", "YES")
 
 func _case_forfeit() -> void:
 	## P7: 3-strike forfeit final score. The turn timer is driven by _process,

@@ -3,6 +3,7 @@ extends Node2D
 var board: Node2D
 var turn_manager: Node
 var hud: CanvasLayer
+var audio: Node
 
 func _ready() -> void:
 	# Match any canvas expansion beyond the design size to the table color —
@@ -19,6 +20,11 @@ func _ready() -> void:
 	turn_manager.name = "TurnManager"
 	turn_manager.board = board
 	add_child(turn_manager)
+
+	audio = preload("res://scripts/audio_director.gd").new()
+	audio.name = "Audio"          # stable node path: Main/Audio
+	audio.turn_manager = turn_manager
+	add_child(audio)
 
 	hud = preload("res://scripts/hud.gd").new()
 	hud.name = "HUD"

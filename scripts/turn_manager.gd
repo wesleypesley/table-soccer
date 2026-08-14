@@ -91,6 +91,7 @@ var _facing_rideout_time := 0.0         # seconds the holder has coasted after a
 var release_enabled := true             # harness hook: tether cases isolate the held phase
 
 signal turn_changed(player: int)
+signal goal_scored(scorer: int)
 signal match_over(winner: int)
 
 func _ready() -> void:
@@ -558,6 +559,7 @@ func _on_ball_body_entered(body: Node) -> void:
 
 func _on_goal(scorer: int) -> void:
 	score[scorer] += 1
+	goal_scored.emit(scorer)
 	print("[Match] GOAL! P%d scores — %d-%d" % [scorer, score[0], score[1]])
 	if score[scorer] >= WIN_GOALS:
 		_end_match(scorer, false)
